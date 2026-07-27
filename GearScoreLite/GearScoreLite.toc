@@ -4,8 +4,24 @@
 ## Version: 4x00
 ## Author: Mirrikat45 & Gnomezilla [mod by Kappa]
 ## SavedVariables: GS_Settings
-## OptionalDeps: ElvUI, ShadowedUnitFrames, VuhDo, WeakAuras
 ## X-Conflicts: GearScore
+
+# No OptionalDeps line, deliberately. It used to list ElvUI, ShadowedUnitFrames,
+# VuhDo and WeakAuras, and that broke OmniCC for every WeakAuras icon.
+#
+# OptionalDeps does not merely document a soft dependency: it forces the listed
+# addons to load BEFORE this one. GearScoreLite sorts ahead of OmniCC (G < O),
+# so listing WeakAuras dragged WeakAuras ahead of OmniCC too. WeakAuras then
+# registered PLAYER_LOGIN first, built its icon regions first, and each region
+# copied Cooldown.SetCooldown into cooldown._SetCooldown, which it calls from
+# then on instead of the metatable. OmniCC installs its hook by replacing that
+# metatable entry on its own PLAYER_LOGIN, a moment too late: the copies were
+# already taken, so no WeakAuras cooldown ever reached OmniCC again.
+#
+# Nothing here needs the ordering. Every reference to those addons is a runtime
+# nil check (WeakAuras.ScanEvents in Announce, Focus.unit/.raidid in the tooltip
+# path), which works whenever they happen to load. Re-adding the line reopens
+# the bug for any addon that hooks a shared metatable at login.
 
 informationLite.lua
 GearScoreLite.lua
