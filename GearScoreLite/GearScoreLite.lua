@@ -18,12 +18,12 @@ local tonumber = tonumber
 local GetInventoryItemLink, GetItemInfo = GetInventoryItemLink, GetItemInfo
 local UnitIsPlayer, UnitClass, UnitName, UnitExists = UnitIsPlayer, UnitClass, UnitName, UnitExists
 local UnitIsUnit, CanInspect, NotifyInspect = UnitIsUnit, CanInspect, NotifyInspect
-local GetTime = GetTime
+local GetTime, sort = GetTime, table.sort
 
 -- Session state. Nothing here is saved: an inspect is cheap to redo and stale
 -- scores are worse than no score.
 local GSL = {
-	cache = {},            -- [name] = { score, ilvl, complete, time }
+	cache = {},            -- [name] = { score, ilvl, complete, suspect, time }
 	player = { score = 0, ilvl = 0 },
 	listeners = {},
 	scanName = nil,
@@ -201,9 +201,36 @@ end
 
 -------------------------------- Get Score ------------------------------------
 
+-- Transmogrification, and why a score can only ever be flagged and not fixed.
+--
+-- On AzerothCore with mod-transmog the real item stays in the character's
+-- inventory server-side, but a 3.3.5 client inspecting another player never
+-- receives it. All it gets is the visible-item entry id in the inspect packet,
+-- which IS the transmog appearance -- so GetInventoryItemLink() and
+-- GetInventoryItemID() both resolve to the cosmetic item. There is no client API
+-- that returns the item underneath; the data simply is not sent. Only the local
+-- player is exempt, because "player" reads the real inventory directly.
+--
+-- So instead of pretending to correct it, flag it: a slot whose item level sits
+-- far below the character's own median is almost always mogged, since real gear
+-- within one character clusters tightly. Compared against the MEDIAN, not the
+-- mean -- the mean is dragged down by the very slots being looked for, and a
+-- heavily mogged set would then stop tripping the check at all.
+local MOG_RATIO = 0.6   -- slot ilvl below 60% of the median reads as cosmetic
+local MOG_FLOOR = 40    -- ...but never flag on a trivially small absolute gap
+
+local function MedianOf(Values)
+	local Count = #Values
+	if ( Count == 0 ) then return nil; end
+	sort(Values)
+	if ( Count % 2 == 1 ) then return Values[(Count + 1) / 2]; end
+	return ( Values[Count / 2] + Values[Count / 2 + 1] ) / 2
+end
+
 -- Accepts either the legacy (name, unit) pair or a bare unit token.
--- Returns score, average item level, and whether every equipped item was
--- readable. An incomplete scan is still a usable number, just a low one.
+-- Returns score, average item level, whether every equipped item was readable,
+-- and whether any slot looks transmogrified. An incomplete scan is still a
+-- usable number, just a low one.
 function GearScore_GetScore(Name, Target)
 	if ( Target == nil ) then Target = Name; end
 	if not ( Target ) or not ( UnitIsPlayer(Target) ) then return nil; end
@@ -211,6 +238,9 @@ function GearScore_GetScore(Name, Target)
 	local _, PlayerEnglishClass = UnitClass(Target)
 	local GearScore, ItemCount, LevelTotal, TitanGrip = 0, 0, 0, 1
 	local Complete = true
+	-- Own inventory is read directly, so it is never subject to the mog blind spot.
+	local CanBeMogged = not UnitIsUnit(Target, "player")
+	local Levels = {}
 
 	-- Titan's Grip: a two-hander in either hand halves both weapon slots.
 	local MainLink = GetInventoryItemLink(Target, 16)
@@ -234,6 +264,13 @@ function GearScore_GetScore(Name, Target)
 					GearScore = GearScore + TempScore
 					ItemCount = ItemCount + 1
 					LevelTotal = LevelTotal + ( ItemLevel or 0 )
+					-- Weapons are excluded from the mog check: their item levels
+					-- legitimately differ from armour, and from each other under
+					-- Titan's Grip, so they produce false positives.
+					if ( CanBeMogged ) and ( ItemLevel ) and ( ItemLevel > 0 )
+					   and ( i ~= 16 ) and ( i ~= 17 ) and ( i ~= 18 ) then
+						Levels[#Levels + 1] = ItemLevel
+					end
 				else
 					-- Not cached locally yet; the GetItemInfo() call above queues the
 					-- server lookup. Skip the slot so the average stays honest and
@@ -247,7 +284,24 @@ function GearScore_GetScore(Name, Target)
 	if ( GearScore < 0 ) then GearScore = 0; end
 	local Average = 0
 	if ( ItemCount > 0 ) then Average = floor((LevelTotal / ItemCount) + 0.5); end
-	return floor(GearScore), Average, Complete
+
+	-- Needs enough armour slots for a median to mean anything. A partial scan is
+	-- left unflagged: the missing slots are exactly the ones that would set the
+	-- median, so an early verdict here would be noise.
+	local Suspect = false
+	if ( Complete ) and ( #Levels >= 5 ) then
+		local Median = MedianOf(Levels)
+		if ( Median ) then
+			for i = 1, #Levels do
+				if ( Levels[i] < Median * MOG_RATIO ) and ( Median - Levels[i] >= MOG_FLOOR ) then
+					Suspect = true
+					break
+				end
+			end
+		end
+	end
+
+	return floor(GearScore), Average, Complete, Suspect
 end
 
 --------------------------- Asynchronous inspect ------------------------------
@@ -295,18 +349,32 @@ end
 local function ScanUnit(Name, Unit)
 	if ( CanInspect(Unit) ) and not ( InspectInUse() ) then
 		local Now = GetTime()
-		if ( GSL.lastInspectName ~= Name ) or ( ( Now - GSL.lastInspectTime ) > 2 ) then
+		-- Re-request on a 1.5s debounce rather than a single shot per unit. The
+		-- rescan loop ticks every 0.5s, so the previous 2s gate let at most every
+		-- fourth pass through and the rest spun over an empty inventory; if the
+		-- one request that did go out was dropped, nothing ever asked again.
+		if ( GSL.lastInspectName ~= Name ) or ( ( Now - GSL.lastInspectTime ) > 1.5 ) then
 			GSL.lastInspectName = Name
 			GSL.lastInspectTime = Now
 			NotifyInspect(Unit)
 		end
 	end
 
-	local Score, Average, Complete = GearScore_GetScore(Name, Unit)
+	local Score, Average, Complete, Suspect = GearScore_GetScore(Name, Unit)
 	if not ( Score ) then return true; end
 
 	local Previous = GSL.cache[Name]
-	GSL.cache[Name] = { score = Score, ilvl = Average, complete = Complete, time = GetTime() }
+
+	-- Out of inspect range (~28 yards) or behind line of sight, every slot reads
+	-- nil and the scan scores 0. That is absence of data, not a score of zero:
+	-- overwriting a known-good entry with it is what made scores vanish mid-raid
+	-- whenever the target drifted away. Keep what we had and report the scan as
+	-- unfinished so the retry loop keeps going.
+	if ( Score == 0 ) and ( Previous ) and ( Previous.score > 0 ) then
+		return false
+	end
+
+	GSL.cache[Name] = { score = Score, ilvl = Average, complete = Complete, suspect = Suspect, time = GetTime() }
 	if not ( Previous ) or ( Previous.score ~= Score ) then
 		Announce(Name, Score, Average)
 		RefreshTooltip(Name)
@@ -333,7 +401,7 @@ local function UpdatePlayer()
 	if ( Score ) then
 		GSL.player.score = Score
 		GSL.player.ilvl = Average
-		GSL.cache[UnitName("player")] = { score = Score, ilvl = Average, complete = Complete, time = GetTime() }
+		GSL.cache[UnitName("player")] = { score = Score, ilvl = Average, complete = Complete, suspect = false, time = GetTime() }
 	end
 	return Complete
 end
@@ -348,7 +416,11 @@ local function Track(Name, Unit)
 	if not ( ScanUnit(Name, Unit) ) then
 		GSL.scanName = Name
 		GSL.scanUnit = Unit
-		GSL.scanTries = 10
+		-- 24 tries at 0.5s = 12 seconds. The old 10 tries (5s) routinely expired
+		-- before the reply arrived: the server hands out one inspect slot at a
+		-- time, so in a 25-man raid the queue alone can outlast that, and the
+		-- entry was then abandoned at 0 until the next mouseover.
+		GSL.scanTries = 24
 		RescanFrame:Show()
 	end
 end
@@ -426,6 +498,13 @@ function GearScore_HookSetUnit()
 		GameTooltip:AddDoubleLine("GearScore: " .. Score, "(iLevel: " .. Entry.ilvl .. ")", Red, Green, Blue, Red, Green, Blue)
 	else
 		GameTooltip:AddLine("GearScore: " .. Score, Red, Green, Blue)
+	end
+
+	-- Say it outright rather than showing a quietly wrong number: an inspected
+	-- player's gear arrives as visible-item ids, so a transmogrified slot is
+	-- indistinguishable from the real thing and drags the score down.
+	if ( Entry.suspect ) then
+		GameTooltip:AddLine("(transmog detected -- score understated)", 1, 0.65, 0.1)
 	end
 
 	if ( GS_Settings.Compare ) then
@@ -642,6 +721,16 @@ EventFrame:SetScript("OnEvent", function(self, event, arg1)
 	elseif ( event == "PLAYER_EQUIPMENT_CHANGED" ) or ( event == "PLAYER_ENTERING_WORLD" ) then
 		QueuePlayerRescan()
 
+	elseif ( event == "INSPECT_READY" ) then
+		-- The actual "gear has arrived" signal. Until this was handled the addon
+		-- only ever guessed, re-reading the inventory on a timer and giving up
+		-- after a fixed number of tries whether or not the data had landed.
+		--
+		-- arg1 is the inspected unit's GUID on 3.3.5, which cannot be turned back
+		-- into a unit token, so the pending scan is what gets re-read. It is the
+		-- only inspect this addon has in flight.
+		if ( GSL.scanName ) then DoRescan(); end
+
 	elseif ( event == "UNIT_INVENTORY_CHANGED" ) then
 		if ( arg1 == "player" ) then
 			QueuePlayerRescan()
@@ -673,6 +762,7 @@ EventFrame:RegisterEvent("ADDON_LOADED")
 EventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 EventFrame:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
 EventFrame:RegisterEvent("UNIT_INVENTORY_CHANGED")
+EventFrame:RegisterEvent("INSPECT_READY")
 EventFrame:RegisterEvent("PLAYER_TARGET_CHANGED")
 EventFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
 EventFrame:RegisterEvent("PLAYER_REGEN_DISABLED")
@@ -697,14 +787,16 @@ SLASH_MY2SCRIPT3 = "/gearscore"
 -- WeakAuras: use a custom trigger on the event GEARSCORELITE_UPDATE, which fires
 -- with (name, score, averageItemLevel) whenever a score changes.
 GearScoreLite = {
-	-- score, averageItemLevel, complete -- nil if the unit is not a player.
+	-- score, averageItemLevel, complete, suspect -- nil if the unit is not a
+	-- player. `suspect` means a slot looks transmogrified, so the score is a
+	-- lower bound rather than a reading.
 	GetScore = function(unit) return GearScore_GetScore(unit) end,
 
-	-- score, averageItemLevel, ageInSeconds -- cache only, never inspects.
+	-- score, averageItemLevel, ageInSeconds, suspect -- cache only, never inspects.
 	GetCached = function(name)
 		local Entry = name and GSL.cache[name]
 		if not ( Entry ) then return nil; end
-		return Entry.score, Entry.ilvl, GetTime() - Entry.time
+		return Entry.score, Entry.ilvl, GetTime() - Entry.time, Entry.suspect
 	end,
 
 	-- Queue an asynchronous inspect; the result arrives via GEARSCORELITE_UPDATE.

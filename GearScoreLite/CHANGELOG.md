@@ -1,5 +1,26 @@
 # Changelog
 
+## 4x01
+Raid reliability. Scores went missing or read far too low in ICC, mostly
+because an inspect that had not answered yet was treated as an answer of zero.
+
+- fix: handle `INSPECT_READY` instead of only polling on a timer. The reply is
+  now what triggers the re-read, so a score no longer depends on the server
+  answering inside a fixed window
+- fix: an inspect that returns nothing (target out of the ~28 yard range or
+  behind line of sight) no longer overwrites a known score with 0, which is
+  what made GearScore vanish when a raid member drifted away
+- fix: retry window raised from 5s to 12s, and the inspect request is
+  re-sent on a 1.5s debounce rather than once per unit. The server grants one
+  inspect at a time, so in a 25-man raid the queue alone could outlast the old
+  window and leave the entry stuck at 0
+- feat: transmogrified slots are flagged in the tooltip. A 3.3.5 client only
+  receives visible-item ids for other players, so on AzerothCore with
+  mod-transmog a mogged slot is indistinguishable from real gear and drags the
+  score down; slots far below the character's median item level are now called
+  out as "transmog detected -- score understated" instead of silently lowering
+  the number. `GetScore`/`GetCached` return this as a fourth value
+
 ## 4x00
 Full rewrite of the scoring engine, tooltip hooks, settings and character-sheet
 UI on top of the inherited codebase. The major version bump reflects the scale
