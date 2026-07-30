@@ -1,6 +1,6 @@
 -------------------------------------------------------------------------------
 --                        GearScoreLite: Reborn                              --
---                             Version 4x00                                  --
+--                             Version 4x02                                  --
 --                              mod by Kappa                                 --
 --     https://github.com/myroslav-bakuta/GearScoreLite_Reborn_mod          --
 --   (forked from https://github.com/Arcitec/GearScoreLite_Reborn)          --
@@ -178,6 +178,12 @@ function GearScore_GetItemScore(ItemLink)
 	if not ( ItemLink ) then return 0, 0; end
 	local QualityScale = 1
 	local _, _, ItemRarity, ItemLevel, _, _, _, _, ItemEquipLoc = GetItemInfo(ItemLink)
+	-- GetItemInfo() fills its cache entry field by field: the name can already be
+	-- back while rarity or item level are still nil. Callers that gate on the name
+	-- alone (GearScore_GetScore) or on nothing at all (the item tooltip hook) then
+	-- reach the comparisons below with nil and throw. Treat a half-filled entry as
+	-- "not cached yet" and let the caller retry.
+	if ( ItemRarity == nil ) or ( ItemLevel == nil ) then return -1, 0, 50, 1, 1, 1, 0, ItemEquipLoc; end
 	local Scale = 1.8618
 	if ( ItemRarity == 5 ) then QualityScale = 1.3; ItemRarity = 4;
 	elseif ( ItemRarity == 1 ) then QualityScale = 0.005; ItemRarity = 2
@@ -196,6 +202,10 @@ function GearScore_GetItemScore(ItemLink)
 			return GearScore, ItemLevel, Slot.ItemSlot, Red, Green, Blue, 0, ItemEquipLoc
 		end
 	end
+	-- 187.05 is the internal heirloom stand-in, not a real item level. The scored
+	-- path above zeroes it before returning; this fall-through (unknown slot, or a
+	-- rarity outside 2-4) has to do the same or the sentinel reaches the tooltip.
+	if ( ItemLevel == 187.05 ) then ItemLevel = 0; end
 	return -1, ItemLevel or 0, 50, 1, 1, 1, 0, ItemEquipLoc
 end
 
@@ -254,7 +264,14 @@ function GearScore_GetScore(Name, Target)
 		if ( i ~= 4 ) then
 			local ItemLink = GetInventoryItemLink(Target, i)
 			if ( ItemLink ) then
-				if ( GetItemInfo(ItemLink) ) then
+				-- Check the fields the score actually needs, not just the name.
+				-- GetItemInfo() populates its cache entry progressively, so the
+				-- name can be back while rarity and item level are still nil;
+				-- gating on the name alone let such a slot through to be scored
+				-- as -1, quietly understating the total on a scan that then
+				-- reported itself complete and stopped retrying.
+				local _, _, ReadyRarity, ReadyLevel = GetItemInfo(ItemLink)
+				if ( ReadyRarity ) and ( ReadyLevel ) then
 					local TempScore, ItemLevel = GearScore_GetItemScore(ItemLink)
 					if ( i == 16 ) or ( i == 17 ) then
 						TempScore = TempScore * TitanGrip
@@ -320,12 +337,17 @@ local function InspectInUse()
 	return false
 end
 
+-- Listeners are third party code. An error thrown in one of them used to unwind
+-- all the way out through ScanUnit and the tooltip hook, and because the hook
+-- sets GSL.inTooltipHook before calling Track() and clears it after, the flag
+-- stayed stuck true -- so every later tooltip silently produced nothing. Isolate
+-- each callback so one broken addon cannot take GearScore down with it.
 local function Announce(Name, Score, Average)
 	if ( WeakAuras ) and ( WeakAuras.ScanEvents ) then
-		WeakAuras.ScanEvents("GEARSCORELITE_UPDATE", Name, Score, Average)
+		pcall(WeakAuras.ScanEvents, "GEARSCORELITE_UPDATE", Name, Score, Average)
 	end
 	for i = 1, #GSL.listeners do
-		GSL.listeners[i](Name, Score, Average)
+		pcall(GSL.listeners[i], Name, Score, Average)
 	end
 end
 
@@ -341,8 +363,11 @@ local function RefreshTooltip(Name)
 	if ( GSL.refreshing ) or ( GSL.inTooltipHook ) or not ( GameTooltip:IsShown() ) then return; end
 	local Shown, Unit = GameTooltip:GetUnit()
 	if ( Shown ~= Name ) or not ( Unit ) then return; end
+	-- SetUnit() re-enters our own OnTooltipSetUnit hook, so an error raised
+	-- anywhere in that pass would skip the reset and leave refreshing stuck true,
+	-- permanently disabling both the rescan redraw and the inspect guard below.
 	GSL.refreshing = true
-	GameTooltip:SetUnit(Unit)
+	pcall(GameTooltip.SetUnit, GameTooltip, Unit)
 	GSL.refreshing = false
 end
 
@@ -481,8 +506,11 @@ function GearScore_HookSetUnit()
 	-- NotifyInspect() would switch the talents shown in that window.
 	if ( Unit ) and not ( GSL.refreshing ) and not ( InspectInUse() ) then
 		if ( not GS_Settings.MustTarget ) or ( UnitIsUnit("target", Unit) ) then
+			-- Cleared through pcall: if anything below throws, an unguarded
+			-- assignment would never run and the flag would stay true, which
+			-- suppresses RefreshTooltip() for the rest of the session.
 			GSL.inTooltipHook = true
-			Track(Name, Unit)
+			pcall(Track, Name, Unit)
 			GSL.inTooltipHook = false
 		end
 	end

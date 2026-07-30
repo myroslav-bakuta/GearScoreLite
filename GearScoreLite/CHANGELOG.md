@@ -1,6 +1,32 @@
 # Changelog
 
-## 4x01
+## 4x02
+Crash and lockup fixes found by running the addon against a real Lua 5.1
+interpreter with a mocked 3.3.5a API. All three faults needed timing or a third
+party addon to reproduce, which is why manual testing never surfaced them.
+
+- fix: an error thrown by a registered callback no longer takes GearScore down
+  with it. `Announce` called listeners directly, so a fault in another addon
+  unwound out through the tooltip hook and left `inTooltipHook` stuck true,
+  which silently suppressed every later tooltip for the rest of the session.
+  Listeners and `WeakAuras.ScanEvents` are now called through `pcall`, and the
+  `inTooltipHook` / `refreshing` guards reset even when something below throws
+- fix: no longer errors on a partially filled item cache. `GetItemInfo`
+  populates its entry field by field, so the name can be back while rarity and
+  item level are still nil; the scan gated on the name alone and the item
+  tooltip hook gated on nothing, so both reached the scoring maths with nil and
+  raised "attempt to compare number with nil"
+- fix: a slot whose item data was still arriving no longer counts as scored.
+  It previously contributed -1 to the total while the scan reported itself
+  complete, locking in a score several hundred points low; such a scan is now
+  reported incomplete so the retry loop keeps going and the average item level
+  stays honest
+- fix: the internal 187.05 heirloom placeholder no longer reaches the tooltip
+  as a real item level. It was zeroed only on the scored path, so an heirloom
+  in a slot outside `GS_ItemTypes` returned the sentinel verbatim
+- chore: Lua 5.1 test harness in `.luatest/` (mocked WoW API, 279 checks over
+  the colour schemes, scoring, tooltips, slash commands, events and public API).
+  Run with `python .luatest/run.py`
 Raid reliability. Scores went missing or read far too low in ICC, mostly
 because an inspect that had not answered yet was treated as an answer of zero.
 
