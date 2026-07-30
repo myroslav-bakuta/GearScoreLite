@@ -1,1 +1,2 @@
-RELEASE_NOTES_4x*
+__pycache__/
+*.pyc

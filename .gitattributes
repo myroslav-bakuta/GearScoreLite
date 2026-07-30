@@ -1,0 +1,10 @@
+# CI runs on Linux. A CRLF here would reach the runner's shell as a literal
+# \r on the end of every command, so these must stay LF regardless of the
+# committer's core.autocrlf.
+*.yml text eol=lf
+*.yaml text eol=lf
+*.py text eol=lf
+*.sh text eol=lf
+*.md text eol=lf
+
+*.ttf binary
