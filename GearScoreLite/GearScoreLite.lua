@@ -1,6 +1,6 @@
 -------------------------------------------------------------------------------
 --                        GearScoreLite: Reborn                              --
---                             Version 4x02                                  --
+--                             Version 4x03                                  --
 --                              mod by Kappa                                 --
 --     https://github.com/myroslav-bakuta/GearScoreLite_Reborn_mod          --
 --   (forked from https://github.com/Arcitec/GearScoreLite_Reborn)          --
@@ -19,6 +19,8 @@ local GetInventoryItemLink, GetItemInfo = GetInventoryItemLink, GetItemInfo
 local UnitIsPlayer, UnitClass, UnitName, UnitExists = UnitIsPlayer, UnitClass, UnitName, UnitExists
 local UnitIsUnit, CanInspect, NotifyInspect = UnitIsUnit, CanInspect, NotifyInspect
 local GetTime, sort = GetTime, table.sort
+local format, date, tostring = string.format, date, tostring
+local UnitIsConnected = UnitIsConnected
 
 -- Session state. Nothing here is saved: an inspect is cheap to redo and stale
 -- scores are worse than no score.
@@ -35,7 +37,53 @@ local GSL = {
 	lastInspectTime = 0,
 	inCombat = false,
 	refreshing = false,
+	queue = {},            -- names waiting for an inspect slot, oldest first
+	queued = {},           -- [name] = unit token, membership test for the above
+	blocked = {},          -- [name] = reason code from the last blocked scan
+	log = {},              -- ring buffer of recent scan events, for /gs dump
+	logNext = 1,
 }
+
+------------------------------- Diagnostics -----------------------------------
+
+-- Why this exists: every failure mode of an inspect looks identical from the
+-- outside -- no score in the tooltip. Out of range, an inspect window holding
+-- the slot, and items still in flight are three different bugs with three
+-- different fixes, so the addon records which one actually happened.
+
+local LOG_MAX = 120  -- ring buffer; a raid pull generates entries fast
+
+-- GetTime() is seconds since client start, which is meaningless in a pasted
+-- report. Log wall-clock instead so timings can be read directly.
+local function Stamp()
+	return date("%H:%M:%S")
+end
+
+local function Log(Format, ...)
+	local Ok, Text = pcall(format, Format, ...)
+	if not ( Ok ) then Text = tostring(Format); end
+	Text = Stamp() .. "  " .. Text
+
+	-- Written even when debug output is off: /gs dump right after something goes
+	-- wrong is the common case, and asking the user to reproduce it with debug
+	-- enabled loses the very event they wanted to report.
+	GSL.log[GSL.logNext] = Text
+	GSL.logNext = ( GSL.logNext % LOG_MAX ) + 1
+
+	if ( GS_Settings ) and ( GS_Settings.Debug ) then
+		print("|cff66ccffGS|r " .. Text)
+	end
+end
+
+-- Oldest first. The buffer wraps, so read from logNext around to logNext - 1.
+local function LogLines()
+	local Lines = {}
+	for i = 0, LOG_MAX - 1 do
+		local Entry = GSL.log[( ( GSL.logNext - 1 + i ) % LOG_MAX ) + 1]
+		if ( Entry ) then Lines[#Lines + 1] = Entry; end
+	end
+	return Lines
+end
 
 -------------------------------- Get Quality ----------------------------------
 
@@ -239,8 +287,9 @@ end
 
 -- Accepts either the legacy (name, unit) pair or a bare unit token.
 -- Returns score, average item level, whether every equipped item was readable,
--- and whether any slot looks transmogrified. An incomplete scan is still a
--- usable number, just a low one.
+-- whether any slot looks transmogrified, and -- for diagnostics -- how many
+-- equipped slots were read out of how many were occupied. An incomplete scan is
+-- still a usable number, just a low one.
 function GearScore_GetScore(Name, Target)
 	if ( Target == nil ) then Target = Name; end
 	if not ( Target ) or not ( UnitIsPlayer(Target) ) then return nil; end
@@ -260,10 +309,12 @@ function GearScore_GetScore(Name, Target)
 		if ( select(9, GetItemInfo(OffLink)) == "INVTYPE_2HWEAPON" ) then TitanGrip = 0.5; end
 	end
 
+	local Occupied = 0
 	for i = 1, 18 do
 		if ( i ~= 4 ) then
 			local ItemLink = GetInventoryItemLink(Target, i)
 			if ( ItemLink ) then
+				Occupied = Occupied + 1
 				-- Check the fields the score actually needs, not just the name.
 				-- GetItemInfo() populates its cache entry progressively, so the
 				-- name can be back while rarity and item level are still nil;
@@ -318,7 +369,7 @@ function GearScore_GetScore(Name, Target)
 		end
 	end
 
-	return floor(GearScore), Average, Complete, Suspect
+	return floor(GearScore), Average, Complete, Suspect, ItemCount, Occupied
 end
 
 --------------------------- Asynchronous inspect ------------------------------
@@ -371,7 +422,57 @@ local function RefreshTooltip(Name)
 	GSL.refreshing = false
 end
 
+-- Why a unit cannot be scored right now, as a short reason code, or nil when
+-- nothing is standing in the way. Ordered from permanent to transient so the
+-- caller can decide whether retrying is worth anything.
+--
+-- CheckInteractDistance index 1 is the ~28 yard inspect range. It is the same
+-- distance the server enforces on the inspect packet, so a false here means the
+-- request would be refused no matter how many times it is repeated.
+local function Obstacle(Unit)
+	if not ( Unit ) or not ( UnitExists(Unit) ) then return "gone"; end
+	if not ( UnitIsPlayer(Unit) ) then return "npc"; end
+	if ( UnitIsUnit(Unit, "player") ) then return nil; end
+	if ( UnitIsConnected ) and not ( UnitIsConnected(Unit) ) then return "offline"; end
+	-- Deliberately no faction test here. UnitCanCooperate() answers "can I group,
+	-- trade or buff this unit", which is not the same question as "can I inspect
+	-- it" -- and private-server builds commonly allow cross-faction inspect
+	-- outright. Treating a hostile player as permanently unscannable skipped them
+	-- entirely: no queue entry, no retry, no score, ever. CanInspect() below is
+	-- the client's own verdict and already reflects whatever rules this realm has.
+	if ( InspectInUse() ) then return "inspectbusy"; end
+	if not ( CanInspect(Unit) ) then return "cannotinspect"; end
+	if ( CheckInteractDistance ) and not ( CheckInteractDistance(Unit, 1) ) then return "range"; end
+	return nil
+end
+
+-- Reason codes rendered for humans. Kept next to Obstacle() so a new code
+-- cannot be added without a matching line here.
+local ObstacleText = {
+	["gone"]          = "unit no longer exists",
+	["npc"]           = "not a player",
+	["offline"]       = "player is offline",
+	["inspectbusy"]   = "inspect window is open, slot in use",
+	["cannotinspect"] = "cannot inspect yet (range, line of sight or faction)",
+	["range"]         = "out of inspect range (~28 yards)",
+}
+
 local function ScanUnit(Name, Unit)
+	local Blocked = Obstacle(Unit)
+	if ( Blocked ) then
+		Log("scan %s blocked: %s", tostring(Name), ObstacleText[Blocked] or Blocked)
+		-- Permanent for this unit, so let the caller stop retrying. Range, a busy
+		-- inspect slot and a client that is not ready to inspect yet are all
+		-- transient: report unfinished and try again.
+		if ( Blocked == "npc" ) or ( Blocked == "gone" ) then
+			GSL.blocked[Name] = Blocked
+			return true
+		end
+		GSL.blocked[Name] = Blocked
+		return false
+	end
+	GSL.blocked[Name] = nil
+
 	if ( CanInspect(Unit) ) and not ( InspectInUse() ) then
 		local Now = GetTime()
 		-- Re-request on a 1.5s debounce rather than a single shot per unit. The
@@ -382,11 +483,15 @@ local function ScanUnit(Name, Unit)
 			GSL.lastInspectName = Name
 			GSL.lastInspectTime = Now
 			NotifyInspect(Unit)
+			Log("NotifyInspect(%s) for %s", tostring(Unit), tostring(Name))
 		end
 	end
 
-	local Score, Average, Complete, Suspect = GearScore_GetScore(Name, Unit)
+	local Score, Average, Complete, Suspect, Read, Total = GearScore_GetScore(Name, Unit)
 	if not ( Score ) then return true; end
+
+	Log("scan %s: score=%d ilvl=%d slots=%d/%d %s", tostring(Name), Score, Average,
+	    Read or 0, Total or 0, Complete and "complete" or "partial")
 
 	local Previous = GSL.cache[Name]
 
@@ -407,18 +512,66 @@ local function ScanUnit(Name, Unit)
 	return Complete
 end
 
+-- The server hands out one inspect slot at a time, so only one unit can ever be
+-- in flight. What changed is what happens to everyone else: they used to be
+-- dropped on the floor, because a second mouseover overwrote the single pending
+-- scan outright. Sweeping a raid frame therefore left every player unscored bar
+-- the last one hovered -- the addon looked like it "did not read GS for all
+-- players". They now wait in a queue and are scanned in turn.
+local QUEUE_MAX = 40   -- a full 40-man raid; beyond that the oldest is dropped
+
+local function Dequeue(Name)
+	if not ( GSL.queued[Name] ) then return; end
+	GSL.queued[Name] = nil
+	for i = 1, #GSL.queue do
+		if ( GSL.queue[i] == Name ) then table.remove(GSL.queue, i); break; end
+	end
+end
+
 local function CancelRescan()
+	if ( GSL.scanName ) then Dequeue(GSL.scanName); end
 	GSL.scanName = nil
 	GSL.scanUnit = nil
 	GSL.scanTries = 0
 end
 
+-- Promote the next queued unit into the active scan slot.
+local function NextInQueue()
+	while ( #GSL.queue > 0 ) do
+		local Name = table.remove(GSL.queue, 1)
+		local Unit = GSL.queued[Name]
+		GSL.queued[Name] = nil
+		-- Queued units go stale: the player walked off, or the frame that supplied
+		-- the token now points at somebody else. Verify before spending the slot.
+		if ( Unit ) and ( UnitExists(Unit) ) and ( UnitName(Unit) == Name ) then
+			GSL.scanName = Name
+			GSL.scanUnit = Unit
+			GSL.scanTries = 24
+			Log("queue -> scanning %s (%d still waiting)", tostring(Name), #GSL.queue)
+			RescanFrame:Show()
+			return true
+		end
+		Log("queue: dropped stale entry %s", tostring(Name))
+	end
+	return false
+end
+
 local function DoRescan()
 	local Name, Unit = GSL.scanName, GSL.scanUnit
-	if not ( Name ) or not ( Unit ) then CancelRescan(); return; end
-	if not ( UnitExists(Unit) ) or ( UnitName(Unit) ~= Name ) then CancelRescan(); return; end
+	if not ( Name ) or not ( Unit ) then CancelRescan(); NextInQueue(); return; end
+	if not ( UnitExists(Unit) ) or ( UnitName(Unit) ~= Name ) then
+		Log("scan %s abandoned: unit changed", tostring(Name))
+		CancelRescan(); NextInQueue(); return
+	end
 	GSL.scanTries = GSL.scanTries - 1
-	if ( ScanUnit(Name, Unit) ) or ( GSL.scanTries <= 0 ) then CancelRescan(); end
+	if ( ScanUnit(Name, Unit) ) then
+		CancelRescan()
+		NextInQueue()
+	elseif ( GSL.scanTries <= 0 ) then
+		Log("scan %s gave up after 24 tries", tostring(Name))
+		CancelRescan()
+		NextInQueue()
+	end
 end
 
 local function UpdatePlayer()
@@ -433,21 +586,92 @@ end
 
 local UpdatePaperDoll  -- forward declaration; defined with the character sheet UI
 
+-- A complete score is still only a snapshot: people regem, swap trinkets and
+-- pick up loot mid-raid, and the cache used to hold the first reading for the
+-- rest of the session. Re-inspect anything older than this on the next request.
+local CACHE_TTL = 600  -- seconds
+
+local function IsFresh(Name)
+	local Entry = GSL.cache[Name]
+	if not ( Entry ) or not ( Entry.complete ) or ( Entry.score <= 0 ) then return false; end
+	return ( GetTime() - Entry.time ) < CACHE_TTL
+end
+
+-- "target" and "mouseover" are the tokens the tooltip hands us, and both point
+-- somewhere else the moment the user looks away -- which then abandons the scan
+-- mid-flight. When the same player also sits in the group, the raidN/partyN
+-- token names them stably for as long as they are in it, so prefer it.
+local function StableUnit(Name, Unit)
+	if not ( Unit ) then return Unit; end
+	if ( Unit ~= "target" ) and ( Unit ~= "mouseover" ) and ( Unit ~= "focus" ) then return Unit; end
+	for i = 1, 40 do
+		local Candidate = "raid" .. i
+		if ( UnitExists(Candidate) ) and ( UnitName(Candidate) == Name ) then return Candidate; end
+	end
+	for i = 1, 4 do
+		local Candidate = "party" .. i
+		if ( UnitExists(Candidate) ) and ( UnitName(Candidate) == Name ) then return Candidate; end
+	end
+	return Unit
+end
+
 -- Queue an inspect for a unit and keep retrying until its items arrive.
-local function Track(Name, Unit)
+local function Track(Name, Unit, Force)
 	if not ( Unit ) or not ( UnitExists(Unit) ) or not ( UnitIsPlayer(Unit) ) then return; end
 	Name = Name or UnitName(Unit)
 	if not ( Name ) then return; end
-	if not ( ScanUnit(Name, Unit) ) then
-		GSL.scanName = Name
-		GSL.scanUnit = Unit
-		-- 24 tries at 0.5s = 12 seconds. The old 10 tries (5s) routinely expired
-		-- before the reply arrived: the server hands out one inspect slot at a
-		-- time, so in a 25-man raid the queue alone can outlast that, and the
-		-- entry was then abandoned at 0 until the next mouseover.
-		GSL.scanTries = 24
-		RescanFrame:Show()
+	Unit = StableUnit(Name, Unit)
+
+	-- A fresh complete entry needs nothing; spending the single inspect slot on
+	-- it would starve the units that have no score at all. `Force` is the public
+	-- API asking outright, which is always a deliberate "read it again now".
+	if not ( Force ) and ( IsFresh(Name) ) then return; end
+
+	-- Record the obstacle before anything else. A permanently blocked unit -- an
+	-- NPC, or one that has already gone -- must never reach the queue: it can
+	-- never succeed, it would hold a slot the rest of the raid needs, and the
+	-- tooltip would report "queued for inspect" instead of the real reason.
+	-- Everything else, faction included, is retried.
+	local Blocked = Obstacle(Unit)
+	GSL.blocked[Name] = Blocked
+	if ( Blocked == "npc" ) or ( Blocked == "gone" ) then
+		Log("skip %s: %s", tostring(Name), ObstacleText[Blocked] or Blocked)
+		Dequeue(Name)
+		return
 	end
+
+	-- Already the active scan, or already waiting. Refresh the stored token --
+	-- the same player can be hovered through a different frame -- but do not
+	-- restart the attempt counter or push a duplicate into the queue.
+	if ( GSL.scanName == Name ) then GSL.scanUnit = Unit; return; end
+	if ( GSL.queued[Name] ) then GSL.queued[Name] = Unit; return; end
+
+	-- Nothing in flight: scan immediately rather than waiting for the next tick.
+	if not ( GSL.scanName ) then
+		if not ( ScanUnit(Name, Unit) ) then
+			GSL.scanName = Name
+			GSL.scanUnit = Unit
+			-- 24 tries at 0.5s = 12 seconds. The old 10 tries (5s) routinely expired
+			-- before the reply arrived: the server hands out one inspect slot at a
+			-- time, so in a 25-man raid the queue alone can outlast that, and the
+			-- entry was then abandoned at 0 until the next mouseover.
+			GSL.scanTries = 24
+			RescanFrame:Show()
+		end
+		return
+	end
+
+	-- Drop the oldest rather than the newest when the queue is full: the newest
+	-- is whoever the user is looking at right now.
+	if ( #GSL.queue >= QUEUE_MAX ) then
+		local Oldest = table.remove(GSL.queue, 1)
+		if ( Oldest ) then GSL.queued[Oldest] = nil; end
+		Log("queue full, dropped %s", tostring(Oldest))
+	end
+	GSL.queue[#GSL.queue + 1] = Name
+	GSL.queued[Name] = Unit
+	Log("queued %s (position %d)", tostring(Name), #GSL.queue)
+	RescanFrame:Show()
 end
 
 RescanFrame:SetScript("OnUpdate", function(self, elapsed)
@@ -460,10 +684,17 @@ RescanFrame:SetScript("OnUpdate", function(self, elapsed)
 		if ( UpdatePlayer() ) then GSL.playerTries = 0; end
 		UpdatePaperDoll()
 	end
-	if ( GSL.scanName ) then DoRescan(); end
+	if ( GSL.scanName ) then
+		DoRescan()
+	else
+		-- The active slot fell idle -- a scan finished or was abandoned outside the
+		-- tick -- so start the next queued unit instead of stalling until the user
+		-- hovers somebody new.
+		NextInQueue()
+	end
 
 	-- Nothing pending: stop burning a frame handler until we are needed again.
-	if ( GSL.playerTries <= 0 ) and not ( GSL.scanName ) then self:Hide(); end
+	if ( GSL.playerTries <= 0 ) and not ( GSL.scanName ) and ( #GSL.queue == 0 ) then self:Hide(); end
 end)
 
 local function QueuePlayerRescan()
@@ -516,7 +747,21 @@ function GearScore_HookSetUnit()
 	end
 
 	local Entry = GSL.cache[Name]
-	if not ( Entry ) or ( Entry.score <= 0 ) then return; end
+	if not ( Entry ) or ( Entry.score <= 0 ) then
+		-- No number yet. Silence here is what makes the addon look broken: the
+		-- user cannot tell "out of range" from "not working". Say which it is.
+		if ( GS_Settings.Status ) and ( Unit ) and not ( UnitIsUnit(Unit, "player") ) then
+			local Reason = GSL.blocked[Name]
+			if ( Reason ) and ( Reason ~= "npc" ) then
+				GameTooltip:AddLine("GearScore: " .. ( ObstacleText[Reason] or Reason ), 0.6, 0.6, 0.6)
+			elseif ( GSL.scanName == Name ) then
+				GameTooltip:AddLine("GearScore: scanning...", 0.6, 0.6, 0.6)
+			elseif ( GSL.queued[Name] ) then
+				GameTooltip:AddLine("GearScore: queued for inspect", 0.6, 0.6, 0.6)
+			end
+		end
+		return
+	end
 
 	local Red, Green, Blue = QualityRGB(Entry.score)
 	local Score = tostring(Entry.score)
@@ -531,7 +776,10 @@ function GearScore_HookSetUnit()
 	-- Say it outright rather than showing a quietly wrong number: an inspected
 	-- player's gear arrives as visible-item ids, so a transmogrified slot is
 	-- indistinguishable from the real thing and drags the score down.
-	if ( Entry.suspect ) then
+	-- Opt-in: on a realm without mod-transmog the flag can only ever be a false
+	-- positive, and even where it is right it is a guess about someone else's
+	-- gear. Off by default, enable with /gs mog.
+	if ( Entry.suspect ) and ( GS_Settings.Transmog ) then
 		GameTooltip:AddLine("(transmog detected -- score understated)", 1, 0.65, 0.1)
 	end
 
@@ -676,6 +924,174 @@ local function ApplyAnchor()
 	if ( Unlocked ) then AnchorHighlight:Show() else AnchorHighlight:Hide() end
 end
 
+------------------------------- Debug report ----------------------------------
+
+-- A copyable window, because the chat frame cannot be selected with the mouse
+-- in 3.3.5 and a scan log is far too long to retype. Built on first use only:
+-- most sessions never open it.
+local DumpFrame
+
+local function BuildDumpFrame()
+	if ( DumpFrame ) then return DumpFrame; end
+
+	local Frame = CreateFrame("Frame", "GearScoreLiteDumpFrame", UIParent)
+	Frame:SetWidth(560)
+	Frame:SetHeight(420)
+	Frame:SetPoint("CENTER")
+	Frame:SetFrameStrata("DIALOG")
+	Frame:SetBackdrop({
+		bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+		edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+		tile = true, tileSize = 32, edgeSize = 32,
+		insets = { left = 11, right = 12, top = 12, bottom = 11 },
+	})
+	Frame:SetMovable(true)
+	Frame:EnableMouse(true)
+	Frame:RegisterForDrag("LeftButton")
+	Frame:SetScript("OnDragStart", function(self) self:StartMoving() end)
+	Frame:SetScript("OnDragStop", function(self) self:StopMovingOrSizing() end)
+
+	local Title = Frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+	Title:SetPoint("TOP", Frame, "TOP", 0, -16)
+	Title:SetText("GearScoreLite -- scan log")
+
+	local Hint = Frame:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+	Hint:SetPoint("TOP", Title, "BOTTOM", 0, -2)
+	Hint:SetText("Ctrl+A then Ctrl+C to copy, Escape to close")
+
+	local Scroll = CreateFrame("ScrollFrame", "GearScoreLiteDumpScroll", Frame, "UIPanelScrollFrameTemplate")
+	Scroll:SetPoint("TOPLEFT", Frame, "TOPLEFT", 18, -52)
+	Scroll:SetPoint("BOTTOMRIGHT", Frame, "BOTTOMRIGHT", -36, 40)
+
+	local Edit = CreateFrame("EditBox", "GearScoreLiteDumpEdit", Scroll)
+	Edit:SetMultiLine(true)
+	Edit:SetAutoFocus(false)
+	Edit:SetFontObject(ChatFontNormal)
+	Edit:SetWidth(490)
+	Edit:SetScript("OnEscapePressed", function() Frame:Hide() end)
+	Scroll:SetScrollChild(Edit)
+
+	local Close = CreateFrame("Button", nil, Frame, "UIPanelButtonTemplate")
+	Close:SetWidth(90)
+	Close:SetHeight(22)
+	Close:SetPoint("BOTTOM", Frame, "BOTTOM", 0, 14)
+	Close:SetText("Close")
+	Close:SetScript("OnClick", function() Frame:Hide() end)
+
+	Frame.edit = Edit
+	DumpFrame = Frame
+	return Frame
+end
+
+-- Header first: the state questions get asked about anyway (version, settings,
+-- what is in flight), so it travels with the log rather than in a follow-up.
+local function DumpText()
+	local Out = {}
+	-- Read the version off the .toc rather than repeating it here, so a release
+	-- bump cannot leave the debug report claiming the wrong build.
+	local Version = GetAddOnMetadata and GetAddOnMetadata("GearScoreLite", "Version") or "?"
+	Out[#Out + 1] = "GearScoreLite: Reborn " .. tostring(Version) .. " -- scan log"
+	Out[#Out + 1] = format("player: %s  score=%d  ilvl=%d",
+		tostring(UnitName("player")), GSL.player.score, GSL.player.ilvl)
+	Out[#Out + 1] = format("settings: colour=%s status=%s mog=%s combat=%s target=%s",
+		tostring(GS_Settings and GS_Settings.ColorMode),
+		tostring(GS_Settings and GS_Settings.Status),
+		tostring(GS_Settings and GS_Settings.Transmog),
+		tostring(GS_Settings and GS_Settings.HideInCombat),
+		tostring(GS_Settings and GS_Settings.MustTarget))
+	Out[#Out + 1] = format("active scan: %s   queued: %d   inspect window open: %s",
+		tostring(GSL.scanName), #GSL.queue, tostring(InspectInUse()))
+
+	local Cached = 0
+	for _ in pairs(GSL.cache) do Cached = Cached + 1; end
+	Out[#Out + 1] = format("cached scores: %d", Cached)
+	Out[#Out + 1] = ""
+	Out[#Out + 1] = "--- log (oldest first) ---"
+
+	local Lines = LogLines()
+	if ( #Lines == 0 ) then
+		Out[#Out + 1] = "(empty -- hover some players first)"
+	else
+		for i = 1, #Lines do Out[#Out + 1] = Lines[i]; end
+	end
+	return table.concat(Out, "\n")
+end
+
+local function ShowDump()
+	local Frame = BuildDumpFrame()
+	Frame.edit:SetText(DumpText())
+	Frame.edit:SetCursorPosition(0)
+	Frame:Show()
+end
+
+-- /gs why: a one-shot verdict for a single player, which is what someone
+-- actually wants when one name in the raid has no number.
+local function Explain(Query)
+	local Name, Unit
+
+	if ( Query ) and ( Query ~= "" ) then
+		Name = Query
+		-- A name is not a unit token, so find a token that currently resolves to
+		-- it; without one only the cache can be reported.
+		for i = 1, 40 do
+			local Candidate = "raid" .. i
+			if ( UnitExists(Candidate) ) and ( UnitName(Candidate) == Name ) then Unit = Candidate; break; end
+		end
+		if not ( Unit ) then
+			for i = 1, 4 do
+				local Candidate = "party" .. i
+				if ( UnitExists(Candidate) ) and ( UnitName(Candidate) == Name ) then Unit = Candidate; break; end
+			end
+		end
+		if not ( Unit ) and ( UnitExists("target") ) and ( UnitName("target") == Name ) then Unit = "target"; end
+	elseif ( UnitExists("target") ) then
+		Unit, Name = "target", UnitName("target")
+	elseif ( UnitExists("mouseover") ) then
+		Unit, Name = "mouseover", UnitName("mouseover")
+	end
+
+	if not ( Name ) then
+		print("GearScore -- /gs why <name>, or target somebody first.")
+		return
+	end
+
+	print("|cff66ccffGearScore|r -- report for " .. tostring(Name) .. ":")
+
+	if ( Unit ) then
+		local Blocked = Obstacle(Unit)
+		if ( Blocked ) then
+			print("  blocked: " .. ( ObstacleText[Blocked] or Blocked ))
+		else
+			print("  inspectable: yes")
+		end
+	else
+		print("  no unit token in range (not in your raid, party or target)")
+	end
+
+	local Entry = GSL.cache[Name]
+	if ( Entry ) then
+		print(format("  cached: score %d, ilvl %d, %s, %d seconds old",
+			Entry.score, Entry.ilvl, Entry.complete and "complete" or "partial",
+			floor(GetTime() - Entry.time)))
+		if ( Entry.suspect ) then print("  flagged as possibly transmogged"); end
+	else
+		print("  cached: nothing yet")
+	end
+
+	if ( GSL.scanName == Name ) then
+		print(format("  currently scanning, %d tries left", GSL.scanTries))
+	elseif ( GSL.queued[Name] ) then
+		print("  waiting in the inspect queue")
+	end
+
+	if ( Unit ) and not ( GSL.cache[Name] ) then
+		local _, _, _, _, Read, Occupied = GearScore_GetScore(Name, Unit)
+		if ( Occupied ) then
+			print(format("  visible gear right now: %d of %d slots readable", Read or 0, Occupied))
+		end
+	end
+end
+
 ------------------------------ Slash commands ---------------------------------
 
 local function Toggle(Key, Label)
@@ -684,11 +1100,15 @@ local function Toggle(Key, Label)
 end
 
 function GS_MANSET(Command)
-	Command = strlower(strtrim(Command or ""))
+	local Raw = strtrim(Command or "")
+	Command = strlower(Raw)
 	-- "step" and "range" take arguments; every other verb is a bare word and
 	-- still matches the Command comparisons below unchanged.
 	local Verb, Args = Command:match("^(%S+)%s*(.*)$")
 	Verb, Args = Verb or Command, Args or ""
+	-- Player names are case sensitive and Command is folded to lower case, so
+	-- "/gs why Kappa" has to read its argument from the untouched input.
+	local RawArgs = Raw:match("^%S+%s+(.*)$") or ""
 
 	if ( Command == "player" ) or ( Command == "show" ) then Toggle("Player", "Player Scores")
 	elseif ( Command == "item" ) then Toggle("Item", "Item Scores")
@@ -696,6 +1116,16 @@ function GS_MANSET(Command)
 	elseif ( Command == "compare" ) then Toggle("Compare", "Comparisons")
 	elseif ( Command == "target" ) then Toggle("MustTarget", "Must Target")
 	elseif ( Command == "combat" ) then Toggle("HideInCombat", "Hide In Combat")
+	elseif ( Command == "mog" ) or ( Command == "transmog" ) then Toggle("Transmog", "Transmog Warning")
+	elseif ( Command == "status" ) then Toggle("Status", "Missing Score Reason")
+	elseif ( Command == "debug" ) then
+		Toggle("Debug", "Debug Logging")
+		if ( GS_Settings.Debug ) then print("GearScore -- /gs dump opens the log in a copyable window."); end
+	elseif ( Verb == "why" ) then Explain(strtrim(RawArgs))
+	elseif ( Command == "dump" ) then ShowDump()
+	elseif ( Command == "queue" ) then
+		print(format("GearScore -- scanning: %s   queued: %d", tostring(GSL.scanName), #GSL.queue))
+		for i = 1, #GSL.queue do print("  " .. i .. ". " .. tostring(GSL.queue[i])); end
 	elseif ( Command == "sheet" ) then Toggle("PaperDoll", "Character Sheet Number"); UpdatePaperDoll()
 	elseif ( Command == "lock" ) or ( Command == "unlock" ) then
 		GS_Settings.Locked = ( Command == "lock" )
@@ -764,10 +1194,21 @@ EventFrame:SetScript("OnEvent", function(self, event, arg1)
 			QueuePlayerRescan()
 		elseif ( GSL.scanName ) and ( arg1 ) and ( UnitName(arg1) == GSL.scanName ) then
 			DoRescan()
+		elseif ( arg1 ) then
+			-- Somebody else changed gear: their cached score is now wrong, so drop
+			-- it rather than serve a stale number until the TTL expires.
+			local Who = UnitName(arg1)
+			if ( Who ) and ( GSL.cache[Who] ) then
+				GSL.cache[Who] = nil
+				Log("cache invalidated for %s (inventory changed)", tostring(Who))
+			end
 		end
 
 	elseif ( event == "PLAYER_TARGET_CHANGED" ) then
-		if ( GSL.scanName ) and ( GSL.scanName ~= UnitName("target") ) then CancelRescan(); end
+		-- The old code cancelled the in-flight scan on every target change, which
+		-- is how a raid sweep ended up with almost nothing scored. Let it finish;
+		-- the "target" token it holds is re-validated by name on each retry, and
+		-- anything that has genuinely gone stale is dropped there.
 		if ( UnitExists("target") ) and ( UnitIsPlayer("target") ) then Track(UnitName("target"), "target"); end
 
 	elseif ( event == "ADDON_LOADED" ) and ( arg1 == "GearScoreLite" ) then
@@ -779,6 +1220,9 @@ EventFrame:SetScript("OnEvent", function(self, event, arg1)
 		for Key, Value in pairs(GS_DefaultSettings) do
 			if ( GS_Settings[Key] == nil ) then GS_Settings[Key] = Value; end
 		end
+		-- Debug spams every scan into chat, so it never survives a reload: leaving
+		-- it on by accident looks exactly like the addon being broken.
+		GS_Settings.Debug = false
 		GSL.inCombat = UnitAffectingCombat("player") and true or false
 		ApplyAnchor()
 		UpdatePaperDoll()
@@ -828,8 +1272,10 @@ GearScoreLite = {
 	end,
 
 	-- Queue an asynchronous inspect; the result arrives via GEARSCORELITE_UPDATE.
+	-- Always re-reads, even when a fresh score is already cached: an explicit
+	-- call is a deliberate request, unlike the automatic tooltip path.
 	Request = function(unit)
-		if ( unit ) and ( UnitExists(unit) ) then Track(UnitName(unit), unit); end
+		if ( unit ) and ( UnitExists(unit) ) then Track(UnitName(unit), unit, true); end
 	end,
 
 	-- Your own score, always current, never needs an inspect.

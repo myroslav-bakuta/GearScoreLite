@@ -70,6 +70,17 @@ local function mkframe(name, parent)
     function f:Hide() self._shown = false end
     function f:IsShown() return self._shown end
     function f:SetOwner() end
+    function f:SetBackdrop(b) self._backdrop = b end
+    function f:SetFrameStrata(s) self._strata = s end
+    -- EditBox / ScrollFrame / Button surface used by the debug dump window.
+    function f:SetMultiLine(m) self._multiline = m end
+    function f:SetAutoFocus(a) self._autofocus = a end
+    function f:SetFontObject(o) self._fontobject = o end
+    function f:SetText(t) self._text = t end
+    function f:GetText() return self._text end
+    function f:SetCursorPosition(p) self._cursor = p end
+    function f:SetScrollChild(c) self._child = c end
+    function f:HighlightText() end
     function f:AddLine(text, r, g, b)
         table.insert(state.tooltipLines, { text = text, r = r, g = g, b = b, double = false })
     end
@@ -121,6 +132,10 @@ function M.install(G)
     end
     G.UnitAffectingCombat = function() return state.combat end
     G.CanInspect = function(u) local d = state.units[u]; return d ~= nil and d.canInspect ~= false end
+    G.UnitIsConnected = function(u) local d = state.units[u]; return d ~= nil and d.connected ~= false end
+    G.UnitCanCooperate = function(a, b) local d = state.units[b]; return d ~= nil and d.cooperate ~= false end
+    -- Index 1 is the ~28 yard inspect range in the real client.
+    G.CheckInteractDistance = function(u, index) local d = state.units[u]; return d ~= nil and d.inRange ~= false end
     G.NotifyInspect = function(u) table.insert(state.notifyInspect, { unit = u, time = state.time }) end
 
     G.GetInventoryItemLink = function(unit, slot)
@@ -149,6 +164,18 @@ function M.install(G)
         for i = 1, select("#", ...) do parts[i] = tostring((select(i, ...))) end
         table.insert(state.prints, table.concat(parts, " "))
     end
+    G.date = os.date
+    -- Read the real .toc rather than repeating the version here, so a release
+    -- bump cannot leave the mock asserting against a stale number.
+    G.GetAddOnMetadata = function(addon, field)
+        if field ~= "Version" then return nil end
+        local f = io.open("GearScoreLite.toc", "r")
+        if not f then return nil end
+        local body = f:read("*a"); f:close()
+        return body:match("##%s*Version:%s*(%S+)")
+    end
+    G.format = string.format
+    G.ChatFontNormal = {}
     G.strlower = string.lower
     G.strtrim = function(s) return (tostring(s):gsub("^%s+", ""):gsub("%s+$", "")) end
     G.tinsert = table.insert

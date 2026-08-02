@@ -36,7 +36,7 @@ GS_ItemTypes = {
 -- saved table is discarded rather than migrated: pre-3x06 releases stored -1 for
 -- "off", and -1 is truthy in Lua, so a silent migration would turn every disabled
 -- option back on.
-GS_SettingsVersion = 5
+GS_SettingsVersion = 6
 
 GS_DefaultSettings = {
 	["Version"] = GS_SettingsVersion,
@@ -46,6 +46,11 @@ GS_DefaultSettings = {
 	["Compare"] = false,      -- show your own score next to theirs
 	["MustTarget"] = false,   -- only score the unit you have targeted
 	["HideInCombat"] = false, -- suppress all tooltip output while in combat
+	-- Off by default: the flag is a heuristic, and on a server without
+	-- mod-transmog it can only ever be a false positive. Opt in with /gs mog.
+	["Transmog"] = false,     -- "(transmog detected)" line on player tooltips
+	["Status"] = true,        -- say why a score is missing instead of showing nothing
+	["Debug"] = false,        -- log every scan step to chat; never saved as on
 	["PaperDoll"] = true,     -- number on the character sheet
 	["Locked"] = true,        -- while locked the number ignores the mouse entirely
 	["AnchorX"] = 72,         -- character sheet number, offset from PaperDollFrame TOPLEFT
@@ -147,10 +152,17 @@ GS_CommandList = {
 	"/gs compare -> Toggles comparison between you and the inspected player.",
 	"/gs target  -> Only score the unit you currently have targeted.",
 	"/gs combat  -> Toggles hiding all GearScore output while in combat.",
+	"/gs mog     -> Toggles the 'transmog detected' tooltip warning (off by default).",
+	"/gs status  -> Toggles the 'out of range / scanning' line when no score is known.",
 	"/gs sheet   -> Toggles the number on the character sheet.",
 	"/gs unlock  -> Lets you drag the character sheet number ('/gs lock' when done).",
 	"/gs color   -> Switches colour scheme (gradient / classic).",
 	"/gs step N  -> Gradient colour step size in GS (default 200).",
 	"/gs range MIN MAX -> Score range the gradient spans (default 3000 6500).",
 	"/gs reset   -> Resets GearScore's options back to default.",
+	"--- Diagnostics ---",
+	"/gs debug   -> Toggles live scan logging in chat.",
+	"/gs why [name] -> Explains why a player has no score (defaults to your target).",
+	"/gs dump    -> Opens a copyable window with the recent scan log.",
+	"/gs queue   -> Shows the pending inspect queue.",
 }

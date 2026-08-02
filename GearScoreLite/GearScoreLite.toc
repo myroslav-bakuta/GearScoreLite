@@ -1,7 +1,7 @@
 ## Interface: 30300
 ## Title: GearScoreLite: Reborn
 ## Notes: Helps you quickly and easily judge a player's level of gear.
-## Version: 4x02
+## Version: 4x03
 ## Author: Mirrikat45 & Gnomezilla [mod by Kappa]
 ## SavedVariables: GS_Settings
 ## X-Conflicts: GearScore

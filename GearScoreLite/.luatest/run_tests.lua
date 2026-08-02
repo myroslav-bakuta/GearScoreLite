@@ -431,6 +431,190 @@ state.inventory["Target"][5] = mkitem("Target_5_new2", 4, 200, "INVTYPE_CHEST")
 local okcb, cberr = pcall(G.GearScoreLite.Request, "target")
 ok(okcb, "a throwing listener does not break the announce path", tostring(cberr))
 
+-- ---------------------------------------------------- transmog opt-in ------
+section("Transmog warning opt-in")
+eq(G.GS_DefaultSettings.Transmog, false, "transmog warning defaults to off")
+
+local function tooltipHas(pattern)
+    for _, l in ipairs(state.tooltipLines) do
+        if type(l.text) == "string" and l.text:find(pattern) then return true end
+    end
+    return false
+end
+
+-- Put a mogged player in front of the tooltip: same name for token and unit so
+-- the hook's cache lookup lands on the entry the scan writes.
+state.units["target"] = { name = "Mogged", class="PALADIN", classLocal="Paladin", exists=true, isPlayer=true }
+G.GS_Settings.Player = true
+G.GS_Settings.Transmog = false
+G.GearScoreLite.Request("target")
+mock.clearTooltip()
+G.GameTooltip:SetUnit("target")
+eq(tooltipHas("transmog"), false, "transmog line hidden when Transmog is off")
+ok(tooltipHas("GearScore:"), "score still shown when transmog line is off")
+
+G.GS_Settings.Transmog = true
+mock.clearTooltip()
+G.GameTooltip:SetUnit("target")
+eq(tooltipHas("transmog detected"), true, "transmog line shown when Transmog is on")
+G.GS_Settings.Transmog = false
+
+-- the slash toggle drives the same setting
+slash("mog")
+eq(G.GS_Settings.Transmog, true, "/gs mog enables the warning")
+slash("mog")
+eq(G.GS_Settings.Transmog, false, "/gs mog toggles it back off")
+
+-- restore the mage target used by earlier sections
+state.units["target"] = { name = "Target", class = "MAGE", classLocal = "Mage", exists = true, isPlayer = true }
+
+-- --------------------------------------------------- missing-score status --
+section("Missing score status line")
+G.GS_Settings.Status = true
+state.units["target"] = { name = "Faraway", class="ROGUE", classLocal="Rogue",
+                          exists=true, isPlayer=true, inRange=false }
+state.inventory["Faraway"] = {}
+mock.clearTooltip()
+G.GameTooltip:SetUnit("target")
+eq(tooltipHas("out of inspect range"), true, "out-of-range player explains itself in the tooltip")
+
+-- Opposite faction must NOT block the scan. UnitCanCooperate answers "can I
+-- group/trade/buff", not "can I inspect", and private-server builds routinely
+-- allow cross-faction inspect -- treating it as permanent skipped such players
+-- outright and they never got a score at all.
+state.units["target"] = { name="Hostile", class="ROGUE", classLocal="Rogue",
+                          exists=true, isPlayer=true, cooperate=false }
+equipFullSet("Hostile", 232)
+G.GearScoreLite.Request("target")
+-- Earlier sections may still hold the single active scan slot, in which case
+-- this unit waits in the queue; drain the loop so the scan actually runs.
+if RescanFrame then
+    RescanFrame:Show()
+    for _ = 1, 120 do pcall(mock.tick, RescanFrame, 0.6) end
+end
+local hs2 = G.GearScoreLite.GetCached("Hostile")
+ok(type(hs2) == "number" and hs2 > 0, "opposite-faction player is still scored", tostring(hs2))
+mock.clearTooltip()
+G.GameTooltip:SetUnit("target")
+eq(tooltipHas("faction"), false, "no faction excuse when the client allows inspect")
+ok(tooltipHas("GearScore:"), "opposite-faction player gets a score line")
+
+-- ...but a client that genuinely refuses is reported and retried, not skipped
+state.units["target"] = { name="Refused", class="ROGUE", classLocal="Rogue",
+                          exists=true, isPlayer=true, canInspect=false }
+state.inventory["Refused"] = {}
+G.GS_Settings.Status = true
+mock.clearTooltip()
+G.GameTooltip:SetUnit("target")
+eq(tooltipHas("cannot inspect yet"), true, "CanInspect false is reported, not silence")
+
+-- with Status off the tooltip stays quiet
+G.GS_Settings.Status = false
+mock.clearTooltip()
+G.GameTooltip:SetUnit("target")
+eq(tooltipHas("cannot inspect"), false, "/gs status off suppresses the reason line")
+G.GS_Settings.Status = true
+slash("status")
+eq(G.GS_Settings.Status, false, "/gs status toggles the setting")
+slash("status")
+
+state.units["target"] = { name = "Target", class = "MAGE", classLocal = "Mage", exists = true, isPlayer = true }
+
+-- ------------------------------------------------------- inspect queue -----
+section("Inspect queue")
+-- Three players who cannot complete a scan (no cached items) must all be
+-- retained: the old single-slot code kept only the last one hovered.
+for i = 1, 3 do
+    local token = "raid" .. i
+    local name = "Queued" .. i
+    state.units[token] = { name = name, class="MAGE", classLocal="Mage", exists=true, isPlayer=true }
+    equipFullSet(name, 232)
+    -- an uncached slot keeps the scan incomplete, so the unit stays pending
+    state.inventory[name][5] = "|cffffffff|Hitem:5150" .. i .. "|h[Pending]|h|r"
+end
+G.GearScoreLite.Request("raid1")
+G.GearScoreLite.Request("raid2")
+G.GearScoreLite.Request("raid3")
+local active = 0
+if G.GearScoreLite.GetCached("Queued1") then active = active + 1 end
+ok(true, "three concurrent requests accepted without error")
+local okq, qe = pcall(slash, "queue")
+ok(okq, "/gs queue does not error", tostring(qe))
+
+-- An NPC is the one genuinely permanent case: it can never be scored, so it
+-- must not occupy a queue slot the rest of the raid needs.
+state.units["raid9"] = { name="Critter", exists=true, isPlayer=false }
+G.GearScoreLite.Request("raid9")
+eq(G.GearScoreLite.GetCached("Critter"), nil, "NPC is never scored")
+local okwhy = pcall(slash, "why Critter")
+ok(okwhy, "/gs why on an NPC does not error")
+
+-- A hostile player, by contrast, must be queued like anyone else.
+state.units["raid8"] = { name="Enemy", class="ROGUE", classLocal="Rogue",
+                         exists=true, isPlayer=true, cooperate=false }
+equipFullSet("Enemy", 226)
+G.GearScoreLite.Request("raid8")
+if RescanFrame then
+    RescanFrame:Show()
+    for _ = 1, 120 do pcall(mock.tick, RescanFrame, 0.6) end
+end
+local es = G.GearScoreLite.GetCached("Enemy")
+ok(type(es) == "number" and es > 0, "hostile player is scanned, not skipped", tostring(es))
+
+-- draining the loop must eventually clear both the active scan and the queue
+if RescanFrame then
+    RescanFrame:Show()
+    for i = 1, 200 do pcall(mock.tick, RescanFrame, 0.6) end
+    ok(not RescanFrame:IsShown(), "rescan frame hides once the queue drains")
+end
+
+-- ---------------------------------------------------------- cache TTL ------
+section("Cache TTL")
+state.units["ttl"] = { name = "Ttl", class="MAGE", classLocal="Mage", exists=true, isPlayer=true }
+equipFullSet("Ttl", 232)
+G.GearScoreLite.Request("ttl")
+local ts1, _, age1 = G.GearScoreLite.GetCached("Ttl")
+ok(type(ts1) == "number" and ts1 > 0, "unit scored into cache", tostring(ts1))
+ok(type(age1) == "number", "GetCached reports an age")
+
+-- inventory change on another player drops their cached entry
+mock.fireEvent(EventFrame, "UNIT_INVENTORY_CHANGED", "ttl")
+eq(G.GearScoreLite.GetCached("Ttl"), nil, "UNIT_INVENTORY_CHANGED invalidates that player's cache")
+
+-- ------------------------------------------------------------ debug mode ---
+section("Debug mode and reporting")
+eq(G.GS_DefaultSettings.Debug, false, "debug defaults to off")
+for _, cmd in ipairs({ "debug", "debug", "dump", "queue", "why", "why Target",
+                       "why NoSuchPlayer", "mog", "mog", "status", "status" }) do
+    local okd, ed = pcall(slash, cmd)
+    ok(okd, "/gs " .. cmd .. " does not error", tostring(ed))
+end
+
+-- debug must not survive a reload
+G.GS_Settings.Debug = true
+EventFrame:RegisterEvent("ADDON_LOADED")
+mock.fireEvent(EventFrame, "ADDON_LOADED", "GearScoreLite")
+eq(G.GS_Settings.Debug, false, "debug is forced off on load")
+
+-- the dump window builds and carries the log
+local okdump, edump = pcall(slash, "dump")
+ok(okdump, "/gs dump builds the window without error", tostring(edump))
+local dumpEdit = G.GearScoreLiteDumpEdit
+ok(dumpEdit ~= nil, "dump edit box created")
+if dumpEdit then
+    local text = dumpEdit:GetText()
+    ok(type(text) == "string" and text:find("scan log"), "dump text has a header")
+    ok(text:find("settings:"), "dump text reports current settings")
+    -- The header must carry the shipped version, not a hardcoded one: a stale
+    -- number here would misidentify every bug report pasted from this window.
+    local tocVersion = G.GetAddOnMetadata("GearScoreLite", "Version")
+    ok(tocVersion and text:find(tocVersion, 1, true),
+       "dump header reports the .toc version", tostring(tocVersion))
+end
+
+-- settings version was bumped alongside the new options
+eq(G.GS_SettingsVersion, 6, "settings version bumped for the new options")
+
 -- ------------------------------------------------------------- results -----
 say("\n" .. string.rep("=", 60))
 say(string.format("PASS: %d   FAIL: %d", pass, fail))

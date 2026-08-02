@@ -1,5 +1,34 @@
 # Changelog
 
+## 4x03
+Scores were missing for most players in a raid. The cause was structural: the
+addon tracked exactly one pending inspect, so hovering a second player discarded
+the first, and every target change cancelled the scan in flight. Sweeping a raid
+frame left nobody scored but the last person hovered.
+
+- fix: pending inspects are queued instead of overwriting one another. The server
+  still grants one inspect at a time, but units now wait their turn rather than
+  being dropped; up to 40 are held, and the oldest is discarded first because the
+  newest is whoever the user is looking at right now
+- fix: `PLAYER_TARGET_CHANGED` no longer cancels the running scan. Retargeting
+  mid-scan was abandoning work that was about to complete
+- fix: `target` and `mouseover` are swapped for the `raidN`/`partyN` token when
+  the same player is in the group. Both tooltip tokens point elsewhere the moment
+  the user looks away, which aborted the scan they had just started
+- fix: cached scores expire after 10 minutes, and another player's entry is
+  dropped outright on `UNIT_INVENTORY_CHANGED`. A score was previously kept for
+  the whole session, so regems and mid-raid loot never showed up
+- feat: `/gs debug` logs every scan step, `/gs dump` opens a copyable window with
+  the recent log and current state, `/gs why <name>` explains why one player has
+  no score, `/gs queue` shows what is pending. The log is always recorded, so
+  `/gs dump` works after the fact without reproducing the fault
+- feat: the tooltip says why a score is missing instead of showing nothing --
+  out of range, inspect window open, scanning, or queued. Toggle with
+  `/gs status`
+- feat: the transmog warning is now opt-in and off by default (`/gs mog`). On a
+  realm without mod-transmog it can only ever be a false positive
+- note: `GS_SettingsVersion` is 6, so saved options reset to their defaults once
+
 ## 4x02
 Crash and lockup fixes found by running the addon against a real Lua 5.1
 interpreter with a mocked 3.3.5a API. All three faults needed timing or a third
