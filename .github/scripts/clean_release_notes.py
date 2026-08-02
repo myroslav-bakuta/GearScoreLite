@@ -3,7 +3,7 @@
 
 Reads the given file, writes the cleaned text to stdout.
 
-    python .github/scripts/clean_release_notes.py RELEASE_NOTES_4x02.md
+    python .github/scripts/clean_release_notes.py .release-notes/RELEASE_NOTES_4x03.md
 """
 
 import re

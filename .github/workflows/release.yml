@@ -42,7 +42,7 @@ jobs:
         id: notes
         run: |
           set -euo pipefail
-          src="RELEASE_NOTES_${{ steps.version.outputs.toc_version }}.md"
+          src=".release-notes/RELEASE_NOTES_${{ steps.version.outputs.toc_version }}.md"
           if [[ -f "$src" ]]; then
             python3 .github/scripts/clean_release_notes.py "$src" > release_body.md
             echo "found=true" >> "$GITHUB_OUTPUT"
