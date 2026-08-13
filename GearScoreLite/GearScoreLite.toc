@@ -1,9 +1,9 @@
 ## Interface: 30300
 ## Title: GearScoreLite: Reborn
 ## Notes: Helps you quickly and easily judge a player's level of gear.
-## Version: 4x03
+## Version: 4x04
 ## Author: Mirrikat45 & Gnomezilla [mod by Kappa]
-## SavedVariables: GS_Settings
+## SavedVariables: GS_Settings, GS_Cache
 ## X-Conflicts: GearScore
 
 # No OptionalDeps line, deliberately. It used to list ElvUI, ShadowedUnitFrames,

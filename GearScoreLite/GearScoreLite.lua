@@ -18,12 +18,12 @@ local tonumber = tonumber
 local GetInventoryItemLink, GetItemInfo = GetInventoryItemLink, GetItemInfo
 local UnitIsPlayer, UnitClass, UnitName, UnitExists = UnitIsPlayer, UnitClass, UnitName, UnitExists
 local UnitIsUnit, CanInspect, NotifyInspect = UnitIsUnit, CanInspect, NotifyInspect
-local GetTime, sort = GetTime, table.sort
+local GetTime, sort, time = GetTime, table.sort, time
 local format, date, tostring = string.format, date, tostring
 local UnitIsConnected = UnitIsConnected
 
--- Session state. Nothing here is saved: an inspect is cheap to redo and stale
--- scores are worse than no score.
+-- Session state. Only clean finished reads leave this table, into GS_Cache; see
+-- the remembered-scores section for what is kept and why.
 local GSL = {
 	cache = {},            -- [name] = { score, ilvl, complete, suspect, time }
 	player = { score = 0, ilvl = 0 },
@@ -31,25 +31,29 @@ local GSL = {
 	scanName = nil,
 	scanUnit = nil,
 	scanTries = 0,
+	scanRead = 0,          -- most slots read so far, to tell progress from a stall
+	scanDeadline = nil,    -- hard stop for the active scan, whatever progress says
 	playerTries = 0,
 	timer = 0,
 	lastInspectName = nil,
 	lastInspectTime = 0,
+	inspectTarget = nil,   -- who the last NotifyInspect on this client asked about
+	answeredFor = nil,     -- whose gear the client is holding right now, by name
 	inCombat = false,
 	refreshing = false,
 	queue = {},            -- names waiting for an inspect slot, oldest first
 	queued = {},           -- [name] = unit token, membership test for the above
 	blocked = {},          -- [name] = reason code from the last blocked scan
+	unsure = {},           -- [name] = re-reads spent on a number that still looks wrong
 	log = {},              -- ring buffer of recent scan events, for /gs dump
 	logNext = 1,
 }
 
 ------------------------------- Diagnostics -----------------------------------
 
--- Why this exists: every failure mode of an inspect looks identical from the
--- outside -- no score in the tooltip. Out of range, an inspect window holding
--- the slot, and items still in flight are three different bugs with three
--- different fixes, so the addon records which one actually happened.
+-- Every failure mode of an inspect looks identical from outside: no score in
+-- the tooltip. Out of range, an inspect window holding the slot, and items still
+-- in flight are three different faults, so record which one actually happened.
 
 local LOG_MAX = 120  -- ring buffer; a raid pull generates entries fast
 
@@ -259,17 +263,24 @@ end
 
 -------------------------------- Get Score ------------------------------------
 
--- Transmogrification, and why a score can only ever be flagged and not fixed.
+-- Transmogrification, and the timing trap it sets.
 --
--- On AzerothCore with mod-transmog the real item stays in the character's
--- inventory server-side, but a 3.3.5 client inspecting another player never
--- receives it. All it gets is the visible-item entry id in the inspect packet,
--- which IS the transmog appearance -- so GetInventoryItemLink() and
--- GetInventoryItemID() both resolve to the cosmetic item. There is no client API
--- that returns the item underneath; the data simply is not sent. Only the local
--- player is exempt, because "player" reads the real inventory directly.
+-- A 3.3.5 client knows two different things about another player's gear. The
+-- visible-item entry ids arrive with the unit itself, from render range, with no
+-- inspect at all -- and on a realm with mod-transmog those fields hold the
+-- COSMETIC item, because they are what the 3D model is drawn from. The real gear
+-- only arrives with the inspect reply, which is what Blizzard's inspect window
+-- draws once INSPECT_TALENT_READY fires.
 --
--- So instead of pretending to correct it, flag it: a slot whose item level sits
+-- Both are read through GetInventoryItemLink(). Which one it returns depends
+-- entirely on whether the reply has landed yet. Reading too early therefore
+-- yields a complete-looking set of cosmetic items: every slot returns a link, so
+-- nothing looks missing, and the transmog set gets scored and cached as final
+-- while the inspect window a metre away shows the real gear. ScanUnit() refuses
+-- to call a scan complete until the reply has actually arrived.
+--
+-- The flag below still earns its place: the reply can genuinely be lost, and a
+-- realm may mog the inspect data too. A slot whose item level sits
 -- far below the character's own median is almost always mogged, since real gear
 -- within one character clusters tightly. Compared against the MEDIAN, not the
 -- mean -- the mean is dragged down by the very slots being looked for, and a
@@ -290,10 +301,31 @@ end
 -- whether any slot looks transmogrified, and -- for diagnostics -- how many
 -- equipped slots were read out of how many were occupied. An incomplete scan is
 -- still a usable number, just a low one.
+-- One scan asks GetItemInfo() about the same link twice per slot -- once to see
+-- whether the fields it needs are back, once inside GearScore_GetItemScore() --
+-- and the rescan loop repeats the whole scan up to two dozen times. Memoising
+-- the readiness probe for the duration of a single call halves that.
+--
+-- Strictly within one call. The entire retry design rests on the answer
+-- CHANGING as items arrive, so a table that outlived the call would pin the
+-- first, emptiest reading and the scan would never complete.
+local function ItemReady(Cache, ItemLink)
+	local Known = Cache[ItemLink]
+	if ( Known == nil ) then
+		local _, _, Rarity, Level = GetItemInfo(ItemLink)
+		-- false, not nil: nil would re-probe on every lookup and defeat the point.
+		Known = ( Rarity and Level ) and { Rarity, Level } or false
+		Cache[ItemLink] = Known
+	end
+	if not ( Known ) then return nil; end
+	return Known[1], Known[2]
+end
+
 function GearScore_GetScore(Name, Target)
 	if ( Target == nil ) then Target = Name; end
 	if not ( Target ) or not ( UnitIsPlayer(Target) ) then return nil; end
 
+	local Ready = {}
 	local _, PlayerEnglishClass = UnitClass(Target)
 	local GearScore, ItemCount, LevelTotal, TitanGrip = 0, 0, 0, 1
 	local Complete = true
@@ -309,19 +341,22 @@ function GearScore_GetScore(Name, Target)
 		if ( select(9, GetItemInfo(OffLink)) == "INVTYPE_2HWEAPON" ) then TitanGrip = 0.5; end
 	end
 
+	-- What each slot actually contributed, kept for /gs gear. A wrong total is
+	-- only diagnosable against the per-slot items the client handed us: seeing a
+	-- level 20 shirt where the inspect window shows tier gear settles in one look
+	-- whether a low score is transmog or a scoring fault.
+	local Breakdown = {}
+
 	local Occupied = 0
 	for i = 1, 18 do
 		if ( i ~= 4 ) then
 			local ItemLink = GetInventoryItemLink(Target, i)
 			if ( ItemLink ) then
 				Occupied = Occupied + 1
-				-- Check the fields the score actually needs, not just the name.
+				-- Check the fields the score actually needs, not just the name:
 				-- GetItemInfo() populates its cache entry progressively, so the
-				-- name can be back while rarity and item level are still nil;
-				-- gating on the name alone let such a slot through to be scored
-				-- as -1, quietly understating the total on a scan that then
-				-- reported itself complete and stopped retrying.
-				local _, _, ReadyRarity, ReadyLevel = GetItemInfo(ItemLink)
+				-- name can be back while rarity and item level are still nil.
+				local ReadyRarity, ReadyLevel = ItemReady(Ready, ItemLink)
 				if ( ReadyRarity ) and ( ReadyLevel ) then
 					local TempScore, ItemLevel = GearScore_GetItemScore(ItemLink)
 					if ( i == 16 ) or ( i == 17 ) then
@@ -332,6 +367,8 @@ function GearScore_GetScore(Name, Target)
 					GearScore = GearScore + TempScore
 					ItemCount = ItemCount + 1
 					LevelTotal = LevelTotal + ( ItemLevel or 0 )
+					Breakdown[#Breakdown + 1] = { slot = i, link = ItemLink,
+					                              ilvl = ItemLevel or 0, score = floor(TempScore) }
 					-- Weapons are excluded from the mog check: their item levels
 					-- legitimately differ from armour, and from each other under
 					-- Titan's Grip, so they produce false positives.
@@ -348,6 +385,12 @@ function GearScore_GetScore(Name, Target)
 			end
 		end
 	end
+
+	-- Zero occupied slots on somebody else means the inspect reply has not landed
+	-- yet, not that they are naked: every slot reads nil until it does. Calling
+	-- that complete lets the caller cache the zero and never arm a retry. The
+	-- player's own inventory is read directly, so an empty one there is real.
+	if ( Occupied == 0 ) and not ( UnitIsUnit(Target, "player") ) then Complete = false; end
 
 	if ( GearScore < 0 ) then GearScore = 0; end
 	local Average = 0
@@ -369,18 +412,25 @@ function GearScore_GetScore(Name, Target)
 		end
 	end
 
-	return floor(GearScore), Average, Complete, Suspect, ItemCount, Occupied
+	return floor(GearScore), Average, Complete, Suspect, ItemCount, Occupied, Breakdown
 end
 
 --------------------------- Asynchronous inspect ------------------------------
 
 -- NotifyInspect() is asynchronous, GetItemInfo() returns nil until the item
 -- reaches the local cache, and the server hands out one inspect slot at a time.
--- Reading the gear on the line after NotifyInspect(), as this addon used to,
--- is why GearScore was so often partial or plain wrong.
+-- Gear read on the line after NotifyInspect() is therefore always empty.
 
 local RescanFrame = CreateFrame("Frame", nil, UIParent)
 RescanFrame:Hide()
+
+-- The loop ticks every 0.5s, so this is a 12 second budget. It is refreshed
+-- whenever a retry reads more slots than the one before it, and capped by
+-- SCAN_DEADLINE so a slot whose item never arrives cannot hold the loop open.
+local SCAN_TRIES = 24
+local SCAN_DEADLINE = 30  -- seconds from the start of a scan, whatever happens
+local SCAN_CONFIRM = 6      -- extra passes before settling a read that looks mogged
+local SCAN_CONFIRM_BUSY = 2 -- ...cut down while others are queued for the same slot
 
 local function InspectInUse()
 	if ( InspectFrame ) and ( InspectFrame:IsShown() ) then return true; end
@@ -388,11 +438,22 @@ local function InspectInUse()
 	return false
 end
 
--- Listeners are third party code. An error thrown in one of them used to unwind
--- all the way out through ScanUnit and the tooltip hook, and because the hook
--- sets GSL.inTooltipHook before calling Track() and clears it after, the flag
--- stayed stuck true -- so every later tooltip silently produced nothing. Isolate
--- each callback so one broken addon cannot take GearScore down with it.
+-- Is an open inspect window already holding THIS unit? Then its gear is in the
+-- client -- the window is drawing it -- and reading costs nothing. Only the
+-- NotifyInspect() request must be withheld, since that would retarget the window.
+local function InspectingUnit(Unit)
+	if not ( Unit ) then return false; end
+	if ( InspectFrame ) and ( InspectFrame:IsShown() ) and ( InspectFrame.unit )
+	   and ( UnitIsUnit(InspectFrame.unit, Unit) ) then return true; end
+	if ( Examiner ) and ( Examiner.IsShown ) and ( Examiner:IsShown() ) and ( Examiner.unit )
+	   and ( UnitIsUnit(Examiner.unit, Unit) ) then return true; end
+	return false
+end
+
+-- Listeners are third party code. An error thrown in one would unwind out
+-- through ScanUnit and the tooltip hook, leaving GSL.inTooltipHook stuck true
+-- and every later tooltip silent. Isolate each callback so one broken addon
+-- cannot take GearScore down with it.
 local function Announce(Name, Score, Average)
 	if ( WeakAuras ) and ( WeakAuras.ScanEvents ) then
 		pcall(WeakAuras.ScanEvents, "GEARSCORELITE_UPDATE", Name, Score, Average)
@@ -440,7 +501,10 @@ local function Obstacle(Unit)
 	-- outright. Treating a hostile player as permanently unscannable skipped them
 	-- entirely: no queue entry, no retry, no score, ever. CanInspect() below is
 	-- the client's own verdict and already reflects whatever rules this realm has.
-	if ( InspectInUse() ) then return "inspectbusy"; end
+
+	-- Only a window held on somebody ELSE blocks us; one held on this very unit
+	-- has already fetched the gear we want.
+	if ( InspectInUse() ) and not ( InspectingUnit(Unit) ) then return "inspectbusy"; end
 	if not ( CanInspect(Unit) ) then return "cannotinspect"; end
 	if ( CheckInteractDistance ) and not ( CheckInteractDistance(Unit, 1) ) then return "range"; end
 	return nil
@@ -456,6 +520,65 @@ local ObstacleText = {
 	["cannotinspect"] = "cannot inspect yet (range, line of sight or faction)",
 	["range"]         = "out of inspect range (~28 yards)",
 }
+
+--------------------------- Remembered scores ---------------------------------
+
+-- The gap this closes is the first seconds of a mouseover. The client has not
+-- answered yet, so there is either no number at all or the cosmetic set, and that
+-- is exactly when the user is looking. A score read cleanly once is still roughly
+-- true a week later, so it is shown straight away while a fresh scan runs behind
+-- it, and the live read replaces it the moment it lands.
+--
+-- Only clean finished reads are kept. A number that still looked transmogged, or
+-- one that gave up without a reply, is precisely what must not be made permanent.
+-- Both bounds are deliberately tight. Every entry here is parsed out of
+-- SavedVariables.lua at each login, and the value of a remembered score decays
+-- fast: in WotLK progression the gear behind it has usually moved on within a
+-- raid lockout or two, at which point showing it buys nothing and costs a wrong
+-- number on screen until the live read lands.
+local STORE_MAX = 300                      -- names kept; a raid night touches a couple of hundred
+local STORE_MAX_AGE = 14 * 24 * 60 * 60    -- a fortnight, about two lockouts
+
+local function Remember(Name, Entry)
+	if ( type(GS_Cache) ~= "table" ) or not ( Name ) or not ( Entry ) then return; end
+	if not ( Entry.complete ) or ( Entry.suspect ) or ( Entry.score <= 0 ) then return; end
+	-- time() is wall clock; GetTime() is uptime and means nothing across sessions.
+	GS_Cache[Name] = { score = Entry.score, ilvl = Entry.ilvl, time = time() }
+end
+
+-- Anything malformed is dropped rather than repaired: the file is user-editable
+-- and a stray value would otherwise reach the tooltip and the score arithmetic.
+local function PruneStore()
+	if ( type(GS_Cache) ~= "table" ) then GS_Cache = {}; return; end
+	local Now, Names = time(), {}
+	for Name, Saved in pairs(GS_Cache) do
+		if ( type(Name) ~= "string" ) or ( type(Saved) ~= "table" )
+		   or ( type(Saved.score) ~= "number" ) or ( Saved.score <= 0 )
+		   or ( type(Saved.time) ~= "number" ) or ( ( Now - Saved.time ) > STORE_MAX_AGE ) then
+			GS_Cache[Name] = nil
+		else
+			if ( type(Saved.ilvl) ~= "number" ) then Saved.ilvl = 0; end
+			Names[#Names + 1] = Name
+		end
+	end
+	if ( #Names <= STORE_MAX ) then return; end
+	sort(Names, function(a, b) return GS_Cache[a].time > GS_Cache[b].time end)
+	for i = STORE_MAX + 1, #Names do GS_Cache[Names[i]] = nil; end
+end
+
+-- What the tooltip and the public API should show for a name.
+local function DisplayEntry(Name)
+	local Entry = GSL.cache[Name]
+	local Saved = ( type(GS_Cache) == "table" ) and GS_Cache[Name] or nil
+	if not ( Saved ) then return Entry; end
+	-- A finished, clean read of what they are wearing now beats any memory.
+	if ( Entry ) and ( Entry.complete ) and not ( Entry.suspect ) then return Entry; end
+	-- Otherwise memory only stands in while it is the better number: a scan still
+	-- filling in slots, or one reading the cosmetic set, is low by definition.
+	if ( Entry ) and ( Entry.score >= Saved.score ) then return Entry; end
+	return { score = Saved.score, ilvl = Saved.ilvl, complete = true, suspect = false,
+	         remembered = Saved.time, time = GetTime() }
+end
 
 local function ScanUnit(Name, Unit)
 	local Blocked = Obstacle(Unit)
@@ -473,51 +596,131 @@ local function ScanUnit(Name, Unit)
 	end
 	GSL.blocked[Name] = nil
 
+	-- Never while an inspect window is open: this request would retarget it. When
+	-- the window already holds this unit the gear is readable below anyway.
 	if ( CanInspect(Unit) ) and not ( InspectInUse() ) then
 		local Now = GetTime()
-		-- Re-request on a 1.5s debounce rather than a single shot per unit. The
-		-- rescan loop ticks every 0.5s, so the previous 2s gate let at most every
-		-- fourth pass through and the rest spun over an empty inventory; if the
-		-- one request that did go out was dropped, nothing ever asked again.
+		-- Debounced rather than fired once per unit: a request the server drops
+		-- has to be asked again, or the unit is stuck with no score at all.
 		if ( GSL.lastInspectName ~= Name ) or ( ( Now - GSL.lastInspectTime ) > 1.5 ) then
 			GSL.lastInspectName = Name
 			GSL.lastInspectTime = Now
+			-- Only the target moves: the client goes on serving whoever it already
+			-- holds until this reply actually lands. Set here as well as in the
+			-- NotifyInspect hook because the local upvalue above bypasses it.
+			GSL.inspectTarget = Name
 			NotifyInspect(Unit)
 			Log("NotifyInspect(%s) for %s", tostring(Unit), tostring(Name))
 		end
 	end
 
-	local Score, Average, Complete, Suspect, Read, Total = GearScore_GetScore(Name, Unit)
+	local Score, Average, Complete, Suspect, Read, Total, Breakdown = GearScore_GetScore(Name, Unit)
 	if not ( Score ) then return true; end
+
+	-- A full set of links is not proof the gear arrived: the visible-item fields
+	-- fill every slot from render range alone, and on a transmog realm they hold
+	-- the cosmetic set. Accepting that as final is how a BiS-geared player ends up
+	-- cached at their transmog score for the next ten minutes.
+	--
+	-- The test has to be per player, not "some reply landed". A normal install has
+	-- seven other addons asking for the same single inspect slot, and every one of
+	-- their replies fires the same event here. Treating any of them as an answer
+	-- meant a reply about somebody else in the raid certified our half-read
+	-- cosmetic set as final, which is exactly the reported fault.
+	if ( Complete ) and not ( UnitIsUnit(Unit, "player") ) and ( GSL.answeredFor ~= Name ) then
+		Complete = false
+	end
 
 	Log("scan %s: score=%d ilvl=%d slots=%d/%d %s", tostring(Name), Score, Average,
 	    Read or 0, Total or 0, Complete and "complete" or "partial")
 
+	-- Item data lands slot by slot, and a fixed try count expires mid-fill in a
+	-- raid, locking in a number several hundred points low. A scan reading more
+	-- slots than last time is progressing, so give its budget back; SCAN_DEADLINE
+	-- still stops gear that never resolves.
+	if ( Name == GSL.scanName ) and ( Read ) and ( Read > ( GSL.scanRead or 0 ) ) then
+		GSL.scanRead = Read
+		if ( GSL.scanDeadline ) and ( GetTime() < GSL.scanDeadline ) and ( GSL.scanTries < SCAN_TRIES ) then
+			GSL.scanTries = SCAN_TRIES
+		end
+	end
+
+	-- A complete read that still looks mogged is very often a half-updated one.
+	-- The client replaces the visible-item entries with the real gear slot by slot,
+	-- so a single pass can catch some slots already real and the rest still
+	-- cosmetic: a third-party inspect list on this realm shows exactly that, tier
+	-- pieces and level 120 cosmetics side by side in one snapshot. Spend a few more
+	-- passes before settling. A reading can only improve, so the best one wins.
+	-- The budget is capped against the queue HERE, each pass, rather than being
+	-- fixed when the scan starts. By the time a queued unit reaches the scan slot
+	-- everyone ahead of it has been dequeued, so a start-time check reads an empty
+	-- queue and always grants the full budget -- the one case it was meant to
+	-- limit. Re-reading it every pass is what actually yields the slot: these
+	-- passes cost the rest of the raid their turn, and a genuinely transmogged
+	-- player reads the same way at pass six as at pass two.
+	local Settle = Complete
+	if ( Complete ) and ( Suspect ) and not ( UnitIsUnit(Unit, "player") ) then
+		local Budget = ( #GSL.queue > 0 ) and SCAN_CONFIRM_BUSY or SCAN_CONFIRM
+		local Left = GSL.scanConfirm or SCAN_CONFIRM
+		if ( Left > Budget ) then Left = Budget; end
+		if ( Left > 0 ) then
+			GSL.scanConfirm = Left - 1
+			Settle = false
+		end
+	end
+
 	local Previous = GSL.cache[Name]
 
 	-- Out of inspect range (~28 yards) or behind line of sight, every slot reads
-	-- nil and the scan scores 0. That is absence of data, not a score of zero:
-	-- overwriting a known-good entry with it is what made scores vanish mid-raid
-	-- whenever the target drifted away. Keep what we had and report the scan as
-	-- unfinished so the retry loop keeps going.
+	-- nil and the scan scores 0. That is absence of data, not a score of zero, so
+	-- keep the known-good entry and report the scan unfinished. Overwriting it is
+	-- what makes a score vanish when a raid member drifts out of range.
 	if ( Score == 0 ) and ( Previous ) and ( Previous.score > 0 ) then
 		return false
 	end
 
-	GSL.cache[Name] = { score = Score, ilvl = Average, complete = Complete, suspect = Suspect, time = GetTime() }
+	-- A reading may only ever improve. Slots resolve one by one and the real gear
+	-- replaces the visible-item entries, so the number climbs; it has no honest
+	-- reason to fall. It falls when another addon inspects somebody else midway
+	-- through our scan: the client drops this player's gear and GetInventoryItemLink
+	-- quietly goes back to serving the cosmetic set. Overwriting here is what let a
+	-- correctly read BiS player decay into their transmog score. A real downgrade
+	-- arrives as UNIT_INVENTORY_CHANGED, which drops the entry outright.
+	if ( Previous ) and ( Previous.score > Score ) then
+		Log("scan %s: ignored a lower reading (%d < %d), inspect data went stale",
+		    tostring(Name), Score, Previous.score)
+		return Settle
+	end
+
+	-- Slot counts are kept with the entry because the live read below goes empty
+	-- the moment anything else is inspected, and "0 of 0" then looks like a fault
+	-- rather than a score taken correctly a minute ago.
+	--
+	-- The per-slot breakdown is kept only while debugging. It is seventeen small
+	-- tables per player and nothing but /gs gear ever reads it, so in a full raid
+	-- it is a few thousand tables held for the session to serve a command nobody
+	-- runs. /gs gear says so and asks for /gs debug when it is missing.
+	GSL.cache[Name] = { score = Score, ilvl = Average, complete = Complete, suspect = Suspect,
+	                    read = Read, occupied = Total, time = GetTime(),
+	                    breakdown = GS_Settings.Debug and Breakdown or nil }
+	-- A clean complete read is the answer; stop charging re-reads against them,
+	-- and it is the only kind worth remembering across sessions. Checked here
+	-- rather than inside Remember() so the hot path does not call it 24 times per
+	-- scan just to have it decline.
+	if ( Complete ) and not ( Suspect ) then
+		GSL.unsure[Name] = nil
+		Remember(Name, GSL.cache[Name])
+	end
 	if not ( Previous ) or ( Previous.score ~= Score ) then
 		Announce(Name, Score, Average)
 		RefreshTooltip(Name)
 	end
-	return Complete
+	return Settle
 end
 
 -- The server hands out one inspect slot at a time, so only one unit can ever be
--- in flight. What changed is what happens to everyone else: they used to be
--- dropped on the floor, because a second mouseover overwrote the single pending
--- scan outright. Sweeping a raid frame therefore left every player unscored bar
--- the last one hovered -- the addon looked like it "did not read GS for all
--- players". They now wait in a queue and are scanned in turn.
+-- in flight. Everyone else waits in this queue and is scanned in turn, rather
+-- than being overwritten by the next mouseover.
 local QUEUE_MAX = 40   -- a full 40-man raid; beyond that the oldest is dropped
 
 local function Dequeue(Name)
@@ -533,6 +736,23 @@ local function CancelRescan()
 	GSL.scanName = nil
 	GSL.scanUnit = nil
 	GSL.scanTries = 0
+	GSL.scanRead = 0
+	GSL.scanDeadline = nil
+	GSL.scanConfirm = SCAN_CONFIRM
+end
+
+-- Everything a fresh scan needs, in one place: the two budgets are easy to set
+-- in one caller and forget in the other.
+local function BeginScan(Name, Unit)
+	GSL.scanName = Name
+	GSL.scanUnit = Unit
+	GSL.scanTries = SCAN_TRIES
+	GSL.scanRead = 0
+	GSL.scanDeadline = GetTime() + SCAN_DEADLINE
+	-- Full budget here; ScanUnit() caps it against the queue on every pass, which
+	-- is the only place the queue length is still meaningful.
+	GSL.scanConfirm = SCAN_CONFIRM
+	RescanFrame:Show()
 end
 
 -- Promote the next queued unit into the active scan slot.
@@ -544,11 +764,8 @@ local function NextInQueue()
 		-- Queued units go stale: the player walked off, or the frame that supplied
 		-- the token now points at somebody else. Verify before spending the slot.
 		if ( Unit ) and ( UnitExists(Unit) ) and ( UnitName(Unit) == Name ) then
-			GSL.scanName = Name
-			GSL.scanUnit = Unit
-			GSL.scanTries = 24
+			BeginScan(Name, Unit)
 			Log("queue -> scanning %s (%d still waiting)", tostring(Name), #GSL.queue)
-			RescanFrame:Show()
 			return true
 		end
 		Log("queue: dropped stale entry %s", tostring(Name))
@@ -568,12 +785,23 @@ local function DoRescan()
 		CancelRescan()
 		NextInQueue()
 	elseif ( GSL.scanTries <= 0 ) then
-		Log("scan %s gave up after 24 tries", tostring(Name))
+		Log("scan %s gave up: %d slots read, budget exhausted", tostring(Name), GSL.scanRead or 0)
+		-- The reply never came, so whatever was read is all there will be. Mark it
+		-- settled: without this the entry stays un-fresh and every later mouseover
+		-- restarts the same doomed scan, which in a raid is most of them. `complete`
+		-- stays false, so the tooltip still shows the number as provisional.
+		local Entry = GSL.cache[Name]
+		if ( Entry ) then Entry.settled = true; end
 		CancelRescan()
 		NextInQueue()
 	end
 end
 
+-- Writes straight to the session cache and deliberately never calls Remember():
+-- your own inventory is read directly and is always current, so a saved copy
+-- could only ever be a staler version of a number already in hand. Keeping it
+-- out also means /gs rescan and the store's age and size limits never have to
+-- reason about an entry that behaves unlike every other one in there.
 local function UpdatePlayer()
 	local Score, Average, Complete = GearScore_GetScore("player")
 	if ( Score ) then
@@ -587,14 +815,30 @@ end
 local UpdatePaperDoll  -- forward declaration; defined with the character sheet UI
 
 -- A complete score is still only a snapshot: people regem, swap trinkets and
--- pick up loot mid-raid, and the cache used to hold the first reading for the
--- rest of the session. Re-inspect anything older than this on the next request.
+-- pick up loot mid-raid. Re-inspect anything older than this on the next request.
 local CACHE_TTL = 600  -- seconds
+
+-- A reading that still trips the transmog check, or one that gave up without ever
+-- getting a reply, is not a snapshot of anything: it is what the client happened
+-- to hold while it was still catching up. The real gear does arrive, just later
+-- and slot by slot, so these come back around in seconds instead of minutes and
+-- the number converges on its own. A re-read can only improve it.
+local CACHE_TTL_UNSURE = 20
+-- ...but not forever. A genuinely transmogged player reads the same way every
+-- time, and would otherwise be re-inspected every twenty seconds for the whole
+-- raid night while everyone else waits for the one inspect slot.
+local UNSURE_RETRIES = 3
 
 local function IsFresh(Name)
 	local Entry = GSL.cache[Name]
-	if not ( Entry ) or not ( Entry.complete ) or ( Entry.score <= 0 ) then return false; end
-	return ( GetTime() - Entry.time ) < CACHE_TTL
+	if not ( Entry ) or ( Entry.score <= 0 ) then return false; end
+	-- `settled` is a scan that ran out of budget without the inspect reply. It is
+	-- not complete and never will be, so treat it as fresh to stop every mouseover
+	-- from restarting it; the TTL still brings it back around eventually.
+	if not ( Entry.complete ) and not ( Entry.settled ) then return false; end
+	local Unsure = ( Entry.suspect or Entry.settled )
+	                and ( ( GSL.unsure[Name] or 0 ) < UNSURE_RETRIES )
+	return ( GetTime() - Entry.time ) < ( Unsure and CACHE_TTL_UNSURE or CACHE_TTL )
 end
 
 -- "target" and "mouseover" are the tokens the tooltip hands us, and both point
@@ -627,11 +871,17 @@ local function Track(Name, Unit, Force)
 	-- API asking outright, which is always a deliberate "read it again now".
 	if not ( Force ) and ( IsFresh(Name) ) then return; end
 
+	-- Charge the re-read against the short lifetime above, so a player whose gear
+	-- never resolves is retried a few times and then left alone.
+	local Stale = GSL.cache[Name]
+	if ( Stale ) and ( Stale.suspect or Stale.settled ) then
+		GSL.unsure[Name] = ( GSL.unsure[Name] or 0 ) + 1
+	end
+
 	-- Record the obstacle before anything else. A permanently blocked unit -- an
-	-- NPC, or one that has already gone -- must never reach the queue: it can
-	-- never succeed, it would hold a slot the rest of the raid needs, and the
-	-- tooltip would report "queued for inspect" instead of the real reason.
-	-- Everything else, faction included, is retried.
+	-- NPC, or one already gone -- must never reach the queue: it can never
+	-- succeed, and it would hold a slot the rest of the raid needs. Everything
+	-- else, faction included, is retried.
 	local Blocked = Obstacle(Unit)
 	GSL.blocked[Name] = Blocked
 	if ( Blocked == "npc" ) or ( Blocked == "gone" ) then
@@ -648,16 +898,7 @@ local function Track(Name, Unit, Force)
 
 	-- Nothing in flight: scan immediately rather than waiting for the next tick.
 	if not ( GSL.scanName ) then
-		if not ( ScanUnit(Name, Unit) ) then
-			GSL.scanName = Name
-			GSL.scanUnit = Unit
-			-- 24 tries at 0.5s = 12 seconds. The old 10 tries (5s) routinely expired
-			-- before the reply arrived: the server hands out one inspect slot at a
-			-- time, so in a 25-man raid the queue alone can outlast that, and the
-			-- entry was then abandoned at 0 until the next mouseover.
-			GSL.scanTries = 24
-			RescanFrame:Show()
-		end
+		if not ( ScanUnit(Name, Unit) ) then BeginScan(Name, Unit); end
 		return
 	end
 
@@ -733,9 +974,9 @@ function GearScore_HookSetUnit()
 	local Name, Unit = ResolveTooltipUnit()
 	if not ( Name ) then return; end
 
-	-- Refuse to touch the inspect slot while an inspect window owns it: our
-	-- NotifyInspect() would switch the talents shown in that window.
-	if ( Unit ) and not ( GSL.refreshing ) and not ( InspectInUse() ) then
+	-- No inspect-window guard here on purpose: ScanUnit() already withholds the
+	-- NotifyInspect(), and repeating the check suppressed the harmless read too.
+	if ( Unit ) and not ( GSL.refreshing ) then
 		if ( not GS_Settings.MustTarget ) or ( UnitIsUnit("target", Unit) ) then
 			-- Cleared through pcall: if anything below throws, an unguarded
 			-- assignment would never run and the flag would stay true, which
@@ -746,7 +987,7 @@ function GearScore_HookSetUnit()
 		end
 	end
 
-	local Entry = GSL.cache[Name]
+	local Entry = DisplayEntry(Name)
 	if not ( Entry ) or ( Entry.score <= 0 ) then
 		-- No number yet. Silence here is what makes the addon look broken: the
 		-- user cannot tell "out of range" from "not working". Say which it is.
@@ -765,12 +1006,31 @@ function GearScore_HookSetUnit()
 
 	local Red, Green, Blue = QualityRGB(Entry.score)
 	local Score = tostring(Entry.score)
-	if not ( Entry.complete ) then Score = Score .. "+"; end  -- still filling in
+	if ( Entry.remembered ) then
+		-- Say it is from memory rather than passing it off as a live reading. An
+		-- unmarked number is taken as what the player is wearing right now, and a
+		-- week-old score presented that way is worse than no score: the user cannot
+		-- tell it is stale, so they never think to wait the second it takes the real
+		-- one to arrive and replace it.
+		Score = Score .. "~"
+	elseif not ( Entry.complete ) then
+		Score = Score .. "+"  -- still filling in
+	end
 
 	if ( GS_Settings.Level ) then
 		GameTooltip:AddDoubleLine("GearScore: " .. Score, "(iLevel: " .. Entry.ilvl .. ")", Red, Green, Blue, Red, Green, Blue)
 	else
 		GameTooltip:AddLine("GearScore: " .. Score, Red, Green, Blue)
+	end
+
+	if ( Entry.remembered ) then
+		local Age = time() - Entry.remembered
+		local Ago
+		if ( Age < 3600 ) then Ago = "moments ago"
+		elseif ( Age < 86400 ) then Ago = floor(Age / 3600) .. "h ago"
+		else Ago = floor(Age / 86400) .. "d ago"
+		end
+		GameTooltip:AddLine("(remembered, " .. Ago .. " -- rescanning)", 0.6, 0.6, 0.6)
 	end
 
 	-- Say it outright rather than showing a quietly wrong number: an inspected
@@ -1024,6 +1284,127 @@ local function ShowDump()
 	Frame:Show()
 end
 
+-- Diagnostics only. "slot 11" does not tell anyone which ring is missing.
+local SlotNames = {
+	[1] = "head", [2] = "neck", [3] = "shoulder", [5] = "chest", [6] = "waist",
+	[7] = "legs", [8] = "feet", [9] = "wrist", [10] = "hands", [11] = "finger1",
+	[12] = "finger2", [13] = "trinket1", [14] = "trinket2", [15] = "back",
+	[16] = "main hand", [17] = "off hand", [18] = "ranged",
+}
+
+-- Slots whose item has not reached the local cache. They are exactly the slots
+-- left out of the score, so they answer "why is this number too low". Transmog
+-- collects here: the cosmetic item is usually one this client has never seen.
+local function UnresolvedSlots(Unit)
+	local Missing = {}
+	for i = 1, 18 do
+		if ( i ~= 4 ) then
+			local ItemLink = GetInventoryItemLink(Unit, i)
+			if ( ItemLink ) then
+				local _, _, Rarity, Level = GetItemInfo(ItemLink)
+				if not ( Rarity ) or not ( Level ) then
+					Missing[#Missing + 1] = SlotNames[i] or ( "slot " .. i )
+				end
+			end
+		end
+	end
+	return Missing
+end
+
+-- The slots the mog heuristic is reacting to, and the median it compared them
+-- against. A bare "possibly transmogged" does not say which slots dragged the
+-- number down, which is the only thing anyone actually wants to know.
+-- Weapons are excluded here exactly as they are in the score itself.
+local function MogOutliers(Unit)
+	local Levels, BySlot = {}, {}
+	for i = 1, 15 do
+		if ( i ~= 4 ) then
+			local ItemLink = GetInventoryItemLink(Unit, i)
+			if ( ItemLink ) then
+				local _, _, Rarity, Level = GetItemInfo(ItemLink)
+				if ( Rarity ) and ( Level ) and ( Level > 0 ) then
+					Levels[#Levels + 1] = Level
+					BySlot[#BySlot + 1] = { slot = i, ilvl = Level }
+				end
+			end
+		end
+	end
+	if ( #Levels < 5 ) then return nil; end
+	local Median = MedianOf(Levels)
+	if not ( Median ) then return nil; end
+
+	local Low = {}
+	for i = 1, #BySlot do
+		local Entry = BySlot[i]
+		if ( Entry.ilvl < Median * MOG_RATIO ) and ( Median - Entry.ilvl >= MOG_FLOOR ) then
+			Low[#Low + 1] = ( SlotNames[Entry.slot] or ( "slot " .. Entry.slot ) ) .. " (" .. Entry.ilvl .. ")"
+		end
+	end
+	return Median, Low
+end
+
+-- Resolve a name to a unit token, or fall back to the current target/mouseover.
+-- Shared by /gs why and /gs gear so the two never disagree about who they mean.
+local function ResolveByName(Query)
+	if ( Query ) and ( Query ~= "" ) then
+		for i = 1, 40 do
+			local Candidate = "raid" .. i
+			if ( UnitExists(Candidate) ) and ( UnitName(Candidate) == Query ) then return Query, Candidate; end
+		end
+		for i = 1, 4 do
+			local Candidate = "party" .. i
+			if ( UnitExists(Candidate) ) and ( UnitName(Candidate) == Query ) then return Query, Candidate; end
+		end
+		if ( UnitExists("target") ) and ( UnitName("target") == Query ) then return Query, "target"; end
+		return Query, nil
+	end
+	if ( UnitExists("target") ) then return UnitName("target"), "target"; end
+	if ( UnitExists("mouseover") ) then return UnitName("mouseover"), "mouseover"; end
+	return nil, nil
+end
+
+-- /gs gear: the per-slot items the last scan actually read, printed as real item
+-- links. Comparing this list against the inspect window is the only way to tell
+-- a transmogrified slot from a scoring fault -- the score alone cannot.
+local function ShowGear(Query)
+	local Name = ResolveByName(Query)
+	if not ( Name ) then
+		print("GearScore -- /gs gear <name>, or target somebody first.")
+		return
+	end
+
+	local Entry = GSL.cache[Name]
+	if not ( Entry ) then
+		print("|cff66ccffGearScore|r -- no scan recorded for " .. tostring(Name) .. " yet. Hover them first.")
+		return
+	end
+	-- Distinguish "never scanned" from "scanned, but the breakdown was not being
+	-- kept": the fix for the second is a setting, not hovering them again.
+	if not ( Entry.breakdown ) or ( #Entry.breakdown == 0 ) then
+		if not ( GS_Settings.Debug ) then
+			print("|cff66ccffGearScore|r -- the per-slot breakdown is only recorded while debugging,")
+			print("  because it is a lot of memory to hold for a whole raid. Run /gs debug, then")
+			print("  hover " .. tostring(Name) .. " again and this will have something to show.")
+		else
+			print("|cff66ccffGearScore|r -- nothing readable in " .. tostring(Name) .. "'s slots on the last scan.")
+		end
+		return
+	end
+
+	print(format("|cff66ccffGearScore|r -- what the last scan read for %s (score %d, iLevel %d, %d seconds ago):",
+		tostring(Name), Entry.score, Entry.ilvl, floor(GetTime() - Entry.time)))
+	for i = 1, #Entry.breakdown do
+		local Slot = Entry.breakdown[i]
+		print(format("  %-10s iLevel %-4d GS %-5d %s",
+			SlotNames[Slot.slot] or ( "slot " .. Slot.slot ),
+			Slot.ilvl, Slot.score, tostring(Slot.link)))
+	end
+	if ( Entry.suspect ) then
+		print("  Slots whose item is far below the rest are what the client received;")
+		print("  on a transmog realm that IS the cosmetic item, not the real one.")
+	end
+end
+
 -- /gs why: a one-shot verdict for a single player, which is what someone
 -- actually wants when one name in the raid has no number.
 local function Explain(Query)
@@ -1073,9 +1454,21 @@ local function Explain(Query)
 		print(format("  cached: score %d, ilvl %d, %s, %d seconds old",
 			Entry.score, Entry.ilvl, Entry.complete and "complete" or "partial",
 			floor(GetTime() - Entry.time)))
-		if ( Entry.suspect ) then print("  flagged as possibly transmogged"); end
+		if ( Entry.occupied ) then
+			print(format("  that scan read %d of %d equipped slots", Entry.read or 0, Entry.occupied))
+		end
+		if ( Entry.suspect ) then
+			print("  transmog: slots far below this character's median iLevel, so the")
+			print("            real gear is better than this score. /gs mog shows it in the tooltip.")
+		end
 	else
 		print("  cached: nothing yet")
+	end
+
+	local Saved = ( type(GS_Cache) == "table" ) and GS_Cache[Name] or nil
+	if ( Saved ) then
+		print(format("  remembered from an earlier session: score %d, ilvl %d, %d hours old",
+			Saved.score, Saved.ilvl or 0, floor(( time() - Saved.time ) / 3600)))
 	end
 
 	if ( GSL.scanName == Name ) then
@@ -1084,10 +1477,40 @@ local function Explain(Query)
 		print("  waiting in the inspect queue")
 	end
 
-	if ( Unit ) and not ( GSL.cache[Name] ) then
+	-- The single most useful line when a number looks too low. One inspect slot is
+	-- shared by every addon on the client, and only the player it currently holds
+	-- reads back real gear; everyone else reads their visible-item entries, which
+	-- on a transmog realm is the cosmetic set.
+	if ( GSL.answeredFor == Name ) then
+		print("  inspect data: the client is holding this player's gear")
+	elseif ( GSL.answeredFor ) then
+		print("  inspect data: the client is holding " .. tostring(GSL.answeredFor)
+		      .. "'s gear, not this player's")
+	else
+		print("  inspect data: none held yet (request in flight)")
+	end
+
+	-- Reported whatever the cache holds: gating on an empty cache hid the slot
+	-- counts in the case that needs them most, a partial entry showing a number
+	-- the user can already see is too low.
+	if ( Unit ) then
 		local _, _, _, _, Read, Occupied = GearScore_GetScore(Name, Unit)
-		if ( Occupied ) then
+		if ( Occupied ) and ( Occupied > 0 ) then
 			print(format("  visible gear right now: %d of %d slots readable", Read or 0, Occupied))
+			local Missing = UnresolvedSlots(Unit)
+			if ( #Missing > 0 ) then
+				print("  unresolved, item data still arriving: " .. table.concat(Missing, ", "))
+			end
+			local Median, Low = MogOutliers(Unit)
+			if ( Median ) and ( Low ) and ( #Low > 0 ) then
+				print(format("  median armour iLevel %d; far below it: %s", Median, table.concat(Low, ", ")))
+			end
+		else
+			-- Not a fault, and in particular not a contradiction of a cached score
+			-- above: the client holds inspect data for one unit at a time, so this
+			-- reads empty as soon as anything else is inspected.
+			print("  no inspect data held right now -- the client keeps only the most")
+			print("  recent inspect, so this says nothing about the score above")
 		end
 	end
 end
@@ -1122,6 +1545,16 @@ function GS_MANSET(Command)
 		Toggle("Debug", "Debug Logging")
 		if ( GS_Settings.Debug ) then print("GearScore -- /gs dump opens the log in a copyable window."); end
 	elseif ( Verb == "why" ) then Explain(strtrim(RawArgs))
+	elseif ( Verb == "gear" ) then ShowGear(strtrim(RawArgs))
+	elseif ( Verb == "rescan" ) then
+		local Who, Token = ResolveByName(strtrim(RawArgs))
+		if ( Token ) then
+			GSL.cache[Who] = nil
+			Track(Who, Token, true)
+			print("GearScore -- re-reading " .. tostring(Who) .. ", check again in a moment.")
+		else
+			print("GearScore -- /gs rescan <name>, or target somebody first.")
+		end
 	elseif ( Command == "dump" ) then ShowDump()
 	elseif ( Command == "queue" ) then
 		print(format("GearScore -- scanning: %s   queued: %d", tostring(GSL.scanName), #GSL.queue))
@@ -1179,36 +1612,74 @@ EventFrame:SetScript("OnEvent", function(self, event, arg1)
 	elseif ( event == "PLAYER_EQUIPMENT_CHANGED" ) or ( event == "PLAYER_ENTERING_WORLD" ) then
 		QueuePlayerRescan()
 
-	elseif ( event == "INSPECT_READY" ) then
-		-- The actual "gear has arrived" signal. Until this was handled the addon
-		-- only ever guessed, re-reading the inventory on a timer and giving up
-		-- after a fixed number of tries whether or not the data had landed.
-		--
-		-- arg1 is the inspected unit's GUID on 3.3.5, which cannot be turned back
-		-- into a unit token, so the pending scan is what gets re-read. It is the
-		-- only inspect this addon has in flight.
+	elseif ( event == "INSPECT_TALENT_READY" ) or ( event == "INSPECT_READY" ) then
+		-- A reply, but the event carries no usable unit: arg1 cannot be turned back
+		-- into a token. The client answers the most recent request, so that is who
+		-- this belongs to -- tracked for every addon on the client, not just ours,
+		-- via the NotifyInspect hook below.
+		GSL.answeredFor = GSL.inspectTarget
 		if ( GSL.scanName ) then DoRescan(); end
 
 	elseif ( event == "UNIT_INVENTORY_CHANGED" ) then
+		-- On somebody else this is usually the arrival of their inspected gear, and
+		-- unlike INSPECT_TALENT_READY it names the unit: it is the precise moment
+		-- GetInventoryItemLink() switches from the visible-item entries to the real
+		-- set, which is why the inspect window and InspectEquip refresh on it.
+		--
+		-- Only counted for the player an inspect was actually requested for. The
+		-- same event fires when a raid member swaps a visible weapon, and taking
+		-- that as an arrival would certify their cosmetic set as real gear.
+		if ( arg1 ) and ( arg1 ~= "player" ) and ( UnitName(arg1) )
+		   and ( UnitName(arg1) == GSL.inspectTarget ) then
+			GSL.answeredFor = UnitName(arg1)
+		end
 		if ( arg1 == "player" ) then
 			QueuePlayerRescan()
 		elseif ( GSL.scanName ) and ( arg1 ) and ( UnitName(arg1) == GSL.scanName ) then
+			-- Mid-scan. Usually this is their inspected gear arriving, but it is
+			-- equally the event for gear genuinely changing, and the two are
+			-- indistinguishable here -- so the partial reading collected so far is
+			-- stale either way and must not be allowed to act as a floor.
+			--
+			-- Without this the monotonic guard in ScanUnit() rejects every lower
+			-- reading against a score that predates the change, so a player who
+			-- downgrades while being scanned keeps their old number for the rest of
+			-- the session. Dropping the entry is what makes "a real downgrade arrives
+			-- as UNIT_INVENTORY_CHANGED" true for the unit under the scanner too,
+			-- and not only for everybody else.
+			GSL.cache[GSL.scanName] = nil
+			if ( type(GS_Cache) == "table" ) then GS_Cache[GSL.scanName] = nil; end
 			DoRescan()
 		elseif ( arg1 ) then
 			-- Somebody else changed gear: their cached score is now wrong, so drop
 			-- it rather than serve a stale number until the TTL expires.
+			--
+			-- The remembered score goes with it. This event is the one moment we
+			-- know for certain the saved number is out of date, and DisplayEntry()
+			-- would otherwise step straight in and serve it in place of the entry
+			-- just dropped -- leaving the stale score on screen, which is the exact
+			-- opposite of invalidating it.
+			--
+			-- Not gated on there being a live entry: the remembered one outlives the
+			-- session and is just as stale whether or not this session read them.
+			-- `blocked` and `unsure` are cleared here too. Both are keyed by name and
+			-- nothing else prunes them, so over a long session in a city they
+			-- accumulate an entry per player walked past and never give it back.
 			local Who = UnitName(arg1)
-			if ( Who ) and ( GSL.cache[Who] ) then
+			if ( Who ) then
+				local Had = ( GSL.cache[Who] ~= nil )
 				GSL.cache[Who] = nil
-				Log("cache invalidated for %s (inventory changed)", tostring(Who))
+				GSL.unsure[Who] = nil
+				GSL.blocked[Who] = nil
+				if ( type(GS_Cache) == "table" ) then GS_Cache[Who] = nil; end
+				if ( Had ) then Log("cache invalidated for %s (inventory changed)", tostring(Who)); end
 			end
 		end
 
 	elseif ( event == "PLAYER_TARGET_CHANGED" ) then
-		-- The old code cancelled the in-flight scan on every target change, which
-		-- is how a raid sweep ended up with almost nothing scored. Let it finish;
-		-- the "target" token it holds is re-validated by name on each retry, and
-		-- anything that has genuinely gone stale is dropped there.
+		-- Deliberately does not cancel the in-flight scan: the "target" token it
+		-- holds is re-validated by name on each retry, and anything genuinely
+		-- stale is dropped there.
 		if ( UnitExists("target") ) and ( UnitIsPlayer("target") ) then Track(UnitName("target"), "target"); end
 
 	elseif ( event == "ADDON_LOADED" ) and ( arg1 == "GearScoreLite" ) then
@@ -1223,6 +1694,7 @@ EventFrame:SetScript("OnEvent", function(self, event, arg1)
 		-- Debug spams every scan into chat, so it never survives a reload: leaving
 		-- it on by accident looks exactly like the addon being broken.
 		GS_Settings.Debug = false
+		PruneStore()
 		GSL.inCombat = UnitAffectingCombat("player") and true or false
 		ApplyAnchor()
 		UpdatePaperDoll()
@@ -1230,14 +1702,36 @@ EventFrame:SetScript("OnEvent", function(self, event, arg1)
 	end
 end)
 
+-- Who the client is about to fetch, whoever asked. INSPECT_TALENT_READY says
+-- only "a reply arrived", so without this the addon cannot tell a reply about the
+-- player it is scanning from a reply about anyone else -- and in a normal install
+-- ElvUI, DBM, Skada, EPGP and BonusScanner are all asking for the same slot.
+-- LibTalentQuery coordinates through this same hook, for the same reason.
+if ( hooksecurefunc ) then
+	hooksecurefunc("NotifyInspect", function(Unit)
+		local Who = ( Unit ) and UnitName(Unit) or nil
+		if ( Who ) then GSL.inspectTarget = Who; end
+	end)
+end
+
 EventFrame:RegisterEvent("ADDON_LOADED")
 EventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 EventFrame:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
 EventFrame:RegisterEvent("UNIT_INVENTORY_CHANGED")
-EventFrame:RegisterEvent("INSPECT_READY")
 EventFrame:RegisterEvent("PLAYER_TARGET_CHANGED")
 EventFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
 EventFrame:RegisterEvent("PLAYER_REGEN_DISABLED")
+
+-- 3.3.5a calls this INSPECT_TALENT_READY; INSPECT_READY is the Cataclysm name.
+-- LibTalentQuery (vendored by DBM, Skada and EPGP) and ElvUI's tooltip both use
+-- the 3.3.5 name, so registering only the Cataclysm one leaves the addon with no
+-- "gear has arrived" signal and back on pure timer polling.
+--
+-- Through pcall because RegisterEvent() throws on an event the client does not
+-- know, and the tooltip hooks, slash commands and public API all sit below here.
+for _, Event in ipairs({ "INSPECT_TALENT_READY", "INSPECT_READY" }) do
+	pcall(EventFrame.RegisterEvent, EventFrame, Event)
+end
 
 GameTooltip:HookScript("OnTooltipSetUnit", GearScore_HookSetUnit)
 GameTooltip:HookScript("OnTooltipSetItem", ItemTooltipHook)
@@ -1264,11 +1758,14 @@ GearScoreLite = {
 	-- lower bound rather than a reading.
 	GetScore = function(unit) return GearScore_GetScore(unit) end,
 
-	-- score, averageItemLevel, ageInSeconds, suspect -- cache only, never inspects.
+	-- score, averageItemLevel, ageInSeconds, suspect, remembered -- cache only,
+	-- never inspects. `remembered` is nil for a reading taken this session, and
+	-- otherwise the wall-clock time the number was last read cleanly: it is a
+	-- stand-in shown while the client answers, not a live measurement.
 	GetCached = function(name)
-		local Entry = name and GSL.cache[name]
+		local Entry = name and DisplayEntry(name)
 		if not ( Entry ) then return nil; end
-		return Entry.score, Entry.ilvl, GetTime() - Entry.time, Entry.suspect
+		return Entry.score, Entry.ilvl, GetTime() - Entry.time, Entry.suspect, Entry.remembered
 	end,
 
 	-- Queue an asynchronous inspect; the result arrives via GEARSCORELITE_UPDATE.
@@ -1279,6 +1776,14 @@ GearScoreLite = {
 	end,
 
 	-- Your own score, always current, never needs an inspect.
+	-- Drop the live reading for a name, leaving the remembered one. The next
+	-- request reads them again from scratch; this is what /gs rescan does.
+	Forget = function(name)
+		if not ( name ) then return; end
+		GSL.cache[name] = nil
+		GSL.unsure[name] = nil
+	end,
+
 	GetPlayer = function() return GSL.player.score, GSL.player.ilvl end,
 
 	-- callback(name, score, averageItemLevel)

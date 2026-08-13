@@ -163,6 +163,8 @@ GS_CommandList = {
 	"--- Diagnostics ---",
 	"/gs debug   -> Toggles live scan logging in chat.",
 	"/gs why [name] -> Explains why a player has no score (defaults to your target).",
+	"/gs gear [name] -> Lists the item the last scan read in each slot, with its score (needs /gs debug).",
+	"/gs rescan [name] -> Drops the cached score and reads the player again.",
 	"/gs dump    -> Opens a copyable window with the recent scan log.",
 	"/gs queue   -> Shows the pending inspect queue.",
 }

@@ -142,22 +142,6 @@ inventory slots on each call.
 - **The 2010 sponsor registry** - a hardcoded list of player and realm names
   that got special tooltip labels.
 
-## Development
-
-The addon logic has a test suite that runs outside the game:
-
-```sh
-cd GearScoreLite
-python .luatest/run.py
-```
-
-Needs `pip install lupa`, which bundles its own interpreter - you do not have to
-install Lua separately. The tests run under **Lua 5.1** specifically, the same
-version the 3.3.5a client embeds; 5.2 and later changed the semantics of `%`,
-division and `math.floor`, so testing on a newer version would miss real bugs.
-
-See [.luatest/README.md](GearScoreLite/.luatest/README.md) for what is covered.
-
 See [CHANGELOG.md](GearScoreLite/CHANGELOG.md) for the full version history.
 
 Have fun!

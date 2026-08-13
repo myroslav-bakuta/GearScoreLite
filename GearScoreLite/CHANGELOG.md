@@ -1,5 +1,65 @@
 # Changelog
 
+## 4x04
+Scores on a transmog realm were wrong rather than missing: a BiS-geared player
+read as their cosmetic set, and once cached, stayed that way. The root cause was
+that the addon never received the "gear has arrived" signal at all. On 3.3.5a
+that event is `INSPECT_TALENT_READY`; only the Cataclysm name `INSPECT_READY`
+was registered, so every scan was running blind on a timer and reading whatever
+the client happened to hold -- which, before the reply lands, is the visible-item
+entries the 3D model is drawn from.
+
+- fix: register `INSPECT_TALENT_READY` alongside `INSPECT_READY`. This is the
+  3.3.5a name for the event, and without it the addon had no arrival signal and
+  fell back to pure timer polling. Both are registered through `pcall`, so a
+  client that knows only one is unaffected
+- fix: an inspect reply is now attributed to the player it belongs to. The event
+  carries no usable unit, and the single inspect slot is shared with every other
+  addon on the client -- ElvUI, DBM, Skada and EPGP all ask for it -- so a reply
+  about somebody else was certifying our half-read cosmetic set as final.
+  `NotifyInspect` is hooked to see requests made by other addons too
+- fix: a reading can no longer fall. Slots resolve one at a time and real gear
+  replaces the cosmetic entries, so a score climbs; it drops only when another
+  addon inspects somebody else mid-scan and the client goes back to serving
+  visible-item data. A genuine downgrade still arrives as
+  `UNIT_INVENTORY_CHANGED`, which drops the entry outright -- including for the
+  unit currently under the scanner, which previously kept its pre-change score
+  for the rest of the session
+- fix: an empty read on another player is no longer treated as a naked
+  character. Every slot reads nil until the inspect reply lands, so scoring that
+  as a complete zero cached it and armed no retry. Your own inventory is read
+  directly, so an empty one there is still real
+- fix: a read that still looks transmogged is given a few more passes before it
+  settles, because the client swaps the cosmetic entries for real gear slot by
+  slot and a single pass can catch a mix of both
+- fix: the scan budget is refreshed whenever a retry reads more slots than the
+  one before it, so a scan filling in during a raid is no longer cut off
+  mid-fill. A 30 second deadline still stops gear that never resolves
+- fix: an open inspect window no longer blocks reading the unit it is already
+  holding. That unit's gear is in the client by definition; only the
+  `NotifyInspect` is withheld, since that would retarget the window
+- feat: scores are remembered between sessions (`GS_Cache`), so a name has a
+  number immediately on mouseover instead of nothing while the client answers.
+  Only clean finished reads are kept, for at most a fortnight and 300 names, and
+  the tooltip marks a remembered score with `~` and its age -- an unmarked number
+  would be taken for what the player is wearing right now
+- feat: `/gs gear [name]` lists what the last scan read in each slot with real
+  item links, which is the only way to tell a transmogrified slot from a scoring
+  fault. Recorded while `/gs debug` is on, since it is a lot of memory to hold
+  for a whole raid
+- feat: `/gs rescan [name]` drops a cached score and reads the player again
+- feat: `/gs why` now reports whose gear the client is currently holding, which
+  slots are still unresolved, and which slots the transmog heuristic is reacting
+  to against the median it compared them with
+- perf: the confirmation passes spent on a transmogged read are cut short while
+  other players are queued, so one mogged player no longer holds the shared
+  inspect slot while a raid waits behind them
+- perf: the item-readiness probe is memoised for the duration of a single scan,
+  halving `GetItemInfo` calls; strictly within one scan, since the retry design
+  depends on the answer changing as items arrive
+- perf: `blocked` and `unsure` bookkeeping is cleared alongside the cache, rather
+  than accumulating an entry per player walked past for the whole session
+
 ## 4x03
 Scores were missing for most players in a raid. The cause was structural: the
 addon tracked exactly one pending inspect, so hovering a second player discarded
