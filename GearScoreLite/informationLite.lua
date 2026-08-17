@@ -36,19 +36,15 @@ GS_ItemTypes = {
 -- saved table is discarded rather than migrated: pre-3x06 releases stored -1 for
 -- "off", and -1 is truthy in Lua, so a silent migration would turn every disabled
 -- option back on.
-GS_SettingsVersion = 6
+GS_SettingsVersion = 7
 
 GS_DefaultSettings = {
 	["Version"] = GS_SettingsVersion,
 	["Player"] = true,        -- GearScore line on player tooltips
 	["Item"] = true,          -- GearScore line on item tooltips
 	["Level"] = false,        -- also show item level
-	["Compare"] = false,      -- show your own score next to theirs
 	["MustTarget"] = false,   -- only score the unit you have targeted
 	["HideInCombat"] = false, -- suppress all tooltip output while in combat
-	-- Off by default: the flag is a heuristic, and on a server without
-	-- mod-transmog it can only ever be a false positive. Opt in with /gs mog.
-	["Transmog"] = false,     -- "(transmog detected)" line on player tooltips
 	["Status"] = true,        -- say why a score is missing instead of showing nothing
 	["Debug"] = false,        -- log every scan step to chat; never saved as on
 	["PaperDoll"] = true,     -- number on the character sheet
@@ -149,10 +145,8 @@ GS_CommandList = {
 	"/gs player  -> Toggles display of scores on players.",
 	"/gs item    -> Toggles display of scores for items.",
 	"/gs level   -> Toggles iLevel information.",
-	"/gs compare -> Toggles comparison between you and the inspected player.",
 	"/gs target  -> Only score the unit you currently have targeted.",
 	"/gs combat  -> Toggles hiding all GearScore output while in combat.",
-	"/gs mog     -> Toggles the 'transmog detected' tooltip warning (off by default).",
 	"/gs status  -> Toggles the 'out of range / scanning' line when no score is known.",
 	"/gs sheet   -> Toggles the number on the character sheet.",
 	"/gs unlock  -> Lets you drag the character sheet number ('/gs lock' when done).",

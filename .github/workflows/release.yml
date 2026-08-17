@@ -14,6 +14,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # The release body is the tagged commit's message, so the commit
+          # itself has to be fetched rather than just the tree.
+          fetch-depth: 0
 
       - name: Read version from .toc and validate against tag
         id: version
@@ -39,25 +43,21 @@ jobs:
           echo "Building version $tag_version"
 
       - name: Prepare release notes
-        id: notes
         run: |
           set -euo pipefail
-          src=".release-notes/RELEASE_NOTES_${{ steps.version.outputs.toc_version }}.md"
-          if [[ -f "$src" ]]; then
-            python3 .github/scripts/clean_release_notes.py "$src" > release_body.md
-            echo "found=true" >> "$GITHUB_OUTPUT"
-            echo "Using $src:"
-            cat release_body.md
-          else
-            echo "found=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::$src not found, falling back to generated notes"
+          # The release body is the message of the commit the tag points at. An
+          # annotated tag's own message is used in preference when it has one.
+          git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > release_body.md
+          if [[ ! -s release_body.md ]]; then
+            git log -1 --format='%B' "$GITHUB_REF_NAME" > release_body.md
           fi
+          cat release_body.md
 
       - name: Stage addon files
         run: |
           set -euo pipefail
           mkdir -p build/GearScoreLite
-          for f in CHANGELOG.md FiraSans-SemiBold.ttf GearScoreLite.lua GearScoreLite.toc informationLite.lua; do
+          for f in FiraSans-SemiBold.ttf GearScoreLite.lua GearScoreLite.toc informationLite.lua; do
             cp "GearScoreLite/$f" "build/GearScoreLite/$f"
           done
           ls -l build/GearScoreLite
@@ -76,6 +76,5 @@ jobs:
         with:
           name: "GearScoreLite: Reborn v${{ steps.version.outputs.version }}"
           files: ${{ steps.archive.outputs.name }}
-          body_path: ${{ steps.notes.outputs.found == 'true' && 'release_body.md' || '' }}
-          generate_release_notes: ${{ steps.notes.outputs.found != 'true' }}
+          body_path: release_body.md
           fail_on_unmatched_files: true

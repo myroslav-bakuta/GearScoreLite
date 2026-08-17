@@ -1,2 +1,10 @@
 __pycache__/
 *.pyc
+
+# Repository holds the shipping addon only.
+GearScoreLite/.luatest/
+graphify-out/
+original_gearscore_addon/
+.remember/
+.claude/
+CLAUDE.md
