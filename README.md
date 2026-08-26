@@ -14,7 +14,7 @@ This intelligent weighting makes it much more useful than simply looking at the 
 
 ## Installation
 
-Download the latest `GearScoreLite - Reborn - vX.Y.Z.zip` from the [Releases page](https://github.com/myroslav-bakuta/GearScoreLite_Reborn_mod/releases), then copy the `GearScoreLite` folder out of it into `Interface\AddOns\` and restart the game.
+Download the latest `GearScoreLite-Reborn-vX.Y.Z.zip` from the [Releases page](https://github.com/myroslav-bakuta/GearScoreLite/releases), then copy the `GearScoreLite` folder out of it into `Interface\AddOns\` and restart the game.
 
 Remove the original `GearScore` addon if you have it - the two define the same globals and whichever loads last silently breaks the other.
 

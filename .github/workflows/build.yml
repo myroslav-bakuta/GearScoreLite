@@ -1,0 +1,196 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "GearScoreLite/**"
+      - ".github/workflows/build.yml"
+      - ".github/scripts/**"
+      - ".luacheckrc"
+  pull_request:
+    branches: [main]
+    paths:
+      - "GearScoreLite/**"
+      - ".github/workflows/build.yml"
+      - ".github/scripts/**"
+      - ".luacheckrc"
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Build a release?"
+        type: choice
+        options: ["no", "yes"]
+        default: "no"
+        required: true
+      version:
+        description: "Version tag, e.g. v4.0.6 (release only; blank = version from GearScoreLite.toc)"
+        type: string
+        required: false
+
+concurrency:
+  group: build-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  # Fast feedback on every push: does the addon still lint?
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Lua 5.1 and luacheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua5.1 luarocks
+          sudo luarocks install luacheck
+
+      - name: Luacheck
+        run: |
+          # luacheck exits 1 for warnings alone and 2+ for real errors, so a
+          # bare call would block the build on style nits. Report everything,
+          # but only fail on errors.
+          set +e
+          output="$(luacheck . -q)"
+          status=$?
+          echo "$output"
+
+          errors="$(echo "$output" | sed -n 's/.*Total:.*\/ \([0-9]\{1,\}\) error.*/\1/p' | tail -1)"
+          errors="${errors:-0}"
+
+          if [ "$errors" -gt 0 ] || [ "$status" -ge 2 ]; then
+            echo "::error::luacheck found $errors error(s)"
+            exit 1
+          fi
+
+          warnings="$(echo "$output" | sed -n 's/.*Total: \([0-9]\{1,\}\) warning.*/\1/p' | tail -1)"
+          if [ "${warnings:-0}" -gt 0 ]; then
+            echo "::warning::luacheck reported $warnings warning(s); not blocking the build"
+          fi
+
+  build:
+    needs: lint
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Release notes are generated from the tag history, which a shallow
+          # clone omits.
+          fetch-depth: 0
+
+      - name: Install Lua 5.1
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua5.1
+
+      - name: Resolve version
+        id: version
+        run: |
+          toc_version="$(sed -n 's/^## Version:[[:space:]]*//p' GearScoreLite/GearScoreLite.toc | head -1)"
+          if [ -z "$toc_version" ]; then
+            echo "::error::no '## Version:' found in GearScoreLite/GearScoreLite.toc"
+            exit 1
+          fi
+
+          case "$toc_version" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *)
+              echo "::error::unexpected version format in .toc: '$toc_version' (expected e.g. 4.0.5)"
+              exit 1
+              ;;
+          esac
+
+          version="${{ inputs.version }}"
+          version="${version:-v$toc_version}"
+          case "$version" in v*) ;; *) version="v$version" ;; esac
+
+          if [ "${{ inputs.release }}" = "yes" ] && [ -n "${{ inputs.version }}" ] && [ "$version" != "v$toc_version" ]; then
+            echo "::error::requested $version but the .toc says v$toc_version -- bump the .toc first"
+            exit 1
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Building $version"
+
+      - name: Stage addon files
+        run: |
+          # The file list is explicit so that stray files in the addon folder
+          # never reach users. A newly shipped file must be added here.
+          mkdir -p dist/GearScoreLite
+          for f in FiraSans-SemiBold.ttf GearScoreLite.lua GearScoreLite.toc informationLite.lua; do
+            cp "GearScoreLite/$f" "dist/GearScoreLite/$f"
+          done
+          ls -l dist/GearScoreLite
+
+      - name: Strip comments and blank lines
+        run: |
+          mapfile -t targets < <(find dist -name "*.lua")
+          echo "Minifying ${#targets[@]} files."
+          python3 .github/scripts/minify_lua.py "${targets[@]}"
+
+      - name: Verify every Lua file still compiles
+        run: |
+          failed=0
+          while IFS= read -r f; do
+            if ! luac5.1 -p "$f" 2>/dev/null && ! luac -p "$f" 2>/dev/null; then
+              echo "::error file=$f::does not compile after minification"
+              failed=1
+            fi
+          done < <(find dist -name "*.lua")
+          [ "$failed" -eq 0 ] || exit 1
+          echo "All Lua files compile under 5.1."
+
+      - name: Package
+        id: package
+        run: |
+          name="GearScoreLite-Reborn-${{ steps.version.outputs.version }}"
+
+          # The .toc version does not change between PRs, so tag
+          # non-release artifacts with the commit to keep them distinct.
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ] || [ "${{ inputs.release }}" != "yes" ]; then
+            artifact="$name-$(git rev-parse --short HEAD)"
+          else
+            artifact="$name"
+          fi
+          (cd dist && zip -qr -X "../$name.zip" GearScoreLite)
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "artifact=$artifact" >> "$GITHUB_OUTPUT"
+          unzip -l "$name.zip"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.package.outputs.artifact }}
+          path: ${{ steps.package.outputs.name }}.zip
+          retention-days: ${{ inputs.release == 'yes' && 90 || 14 }}
+
+      - name: Create GitHub release
+        if: github.event_name == 'workflow_dispatch' && inputs.release == 'yes'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          if gh release view "$version" >/dev/null 2>&1; then
+            echo "::error::release $version already exists"
+            exit 1
+          fi
+          # Newest existing tag by commit date -- not by semver, because
+          # tags like v4.0.1_fix are not valid semver and would be skipped.
+          previous="$(git tag --sort=-creatordate | grep -v "^$version$" | head -1)"
+
+          notes_args=(--generate-notes)
+          if [ -n "$previous" ]; then
+            echo "Generating notes since $previous"
+            notes_args+=(--notes-start-tag "$previous")
+          else
+            echo "No previous tag found; generating notes from the start."
+          fi
+
+          gh release create "$version" \
+            --title "GearScoreLite: Reborn $version" \
+            "${notes_args[@]}" \
+            "${{ steps.package.outputs.name }}.zip"
