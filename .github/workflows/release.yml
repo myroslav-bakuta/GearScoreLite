@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # The release body is the tagged commit's message, so the commit
           # itself has to be fetched rather than just the tree.
@@ -70,7 +70,7 @@ jobs:
           unzip -l "$name"
 
       - name: Publish release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           name: "GearScoreLite: Reborn v${{ steps.version.outputs.version }}"
           files: ${{ steps.archive.outputs.name }}
