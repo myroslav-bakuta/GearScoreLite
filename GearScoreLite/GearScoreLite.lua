@@ -1,8 +1,8 @@
 -------------------------------------------------------------------------------
 --                        GearScoreLite: Reborn                              --
 --                              mod by Kappa                                 --
---     https://github.com/myroslav-bakuta/GearScoreLite_Reborn_mod          --
---   (forked from https://github.com/Arcitec/GearScoreLite_Reborn)          --
+--              https://github.com/myroslav-bakuta/GearScoreLite             --
+--       (forked from https://github.com/Arcitec/GearScoreLite_Reborn)       --
 --                                                                           --
 -------------------------------------------------------------------------------
 
