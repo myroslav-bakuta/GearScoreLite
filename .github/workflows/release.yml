@@ -64,7 +64,7 @@ jobs:
         id: archive
         run: |
           set -euo pipefail
-          name="GearScoreLite - Reborn - v${{ steps.version.outputs.version }}.zip"
+          name="GearScoreLite-Reborn-v${{ steps.version.outputs.version }}.zip"
           (cd build && zip -r -X "../$name" GearScoreLite)
           echo "name=$name" >> "$GITHUB_OUTPUT"
           unzip -l "$name"
