@@ -31,14 +31,14 @@ A player's score appears on their tooltip. While it is being established it carr
 | `GearScore: 6478` | A settled score read a little while ago |
 | `GearScore: 6478 (memory)` | From a previous session, shown while a fresh read runs |
 
-On a realm with transmogrification the first reading is often the cosmetic set, because the client shows that before the inspect reply lands. The addon keeps reading until the set stops changing and then replaces the number with the real gear's score. This usually takes a few seconds of hovering.
+On a realm with transmogrification the first reading is often the cosmetic set, because the client shows that before the inspect reply lands. The cosmetic items never carry gems, while the real ones arrive about half a second later with their gems. Once gems show up, the addon knows it has the real set, uses it even if it scores lower than the cosmetic one, and settles in about a second. For a player who wears no gems at all it waits until the set stops changing, which takes a few seconds. Only a settled or gem-confirmed score is saved for later sessions.
 
 The game only hands over a player's gear while some unit token points at them: your target, focus, the player under the cursor, or a party or raid member. If you move the cursor away from a stranger before their scan finishes, the scan pauses, and the unfinished number stays marked `(scanning)`. Hover them again within two minutes and it continues from where it stopped. Players in your group, your target and your focus are read to the end without hovering.
 
 ## Features
 
 - Scores match GearScore 3.2.1: the 7000 band for ICC/BiS gear, the 12.25 colour scale, rounded average item level, and the Titan's Grip rule (a two-hander in either hand halves both weapon slots).
-- Transmog-aware inspect. Gear arrives in batches, and a cosmetic set can look complete before the real one does. A scan finishes when the set stops changing, so a mogged player ends up with their real score.
+- Transmog-aware inspect. The cosmetic set looks complete before the real one arrives, so the addon tells them apart by gems, which only the real items carry. A mogged player ends up with their real score, and a later cosmetic reading can't replace it.
 - An inspect queue. The server grants one inspect at a time, so the others wait their turn, and sweeping over the raid frames scores everyone you hovered.
 - When a score is missing, the tooltip says why: out of range, inspect window open, scanning, or queued.
 - A diagnostic log (`/gs debug`) saved to disk, so a problem can be reported with everything needed to fix it.
