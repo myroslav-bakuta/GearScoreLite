@@ -914,6 +914,7 @@ Anchor:SetScript("OnDragStart", function(self) self:StartMoving() end)
 
 Anchor:SetScript("OnDragStop", function(self)
 	self:StopMovingOrSizing()
+	if ( self.SetUserPlaced ) then self:SetUserPlaced(false); end
 	local Scale = self:GetEffectiveScale()
 	local ParentScale = PaperDollFrame:GetEffectiveScale()
 	local X = ( self:GetLeft() * Scale - PaperDollFrame:GetLeft() * ParentScale ) / ParentScale
