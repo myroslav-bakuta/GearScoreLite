@@ -824,7 +824,8 @@ function GearScore_HookSetUnit()
 	if ( Entry.remembered ) then
 		local Age = time() - Entry.remembered
 		local Ago
-		if ( Age < 3600 ) then Ago = "moments ago"
+		if ( Age < 60 ) then Ago = "moments ago"
+		elseif ( Age < 3600 ) then Ago = floor(Age / 60) .. "m ago"
 		elseif ( Age < 86400 ) then Ago = floor(Age / 3600) .. "h ago"
 		else Ago = floor(Age / 86400) .. "d ago"
 		end
