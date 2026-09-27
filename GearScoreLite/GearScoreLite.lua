@@ -1001,6 +1001,7 @@ local function BuildDumpFrame()
 	Close:SetScript("OnClick", function() Frame:Hide() end)
 
 	Frame.edit = Edit
+	if ( type(UISpecialFrames) == "table" ) then tinsert(UISpecialFrames, "GearScoreLiteDumpFrame"); end
 	DumpFrame = Frame
 	return Frame
 end
