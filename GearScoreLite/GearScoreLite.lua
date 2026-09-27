@@ -299,6 +299,41 @@ function GearScore_GetScore(Name, Target)
 	return floor(GearScore), Average, Complete, Suspect, ItemCount, Occupied, Breakdown
 end
 
+local function MatchName(Unit, Name, Loose)
+	if not ( UnitExists(Unit) ) then return nil; end
+	local Actual = UnitName(Unit)
+	if not ( Actual ) then return nil; end
+	if ( Actual == Name ) or ( ( Loose ) and ( strlower(Actual) == strlower(Name) ) ) then return Actual; end
+	return nil
+end
+
+local function GroupUnit(Name, Loose)
+	local Raid = GetNumRaidMembers and GetNumRaidMembers() or 40
+	for i = 1, Raid do
+		local Actual = MatchName("raid" .. i, Name, Loose)
+		if ( Actual ) then return "raid" .. i, Actual; end
+	end
+	local Party = GetNumPartyMembers and GetNumPartyMembers() or 4
+	for i = 1, Party do
+		local Actual = MatchName("party" .. i, Name, Loose)
+		if ( Actual ) then return "party" .. i, Actual; end
+	end
+	return nil, nil
+end
+
+local LooseUnits = { "target", "focus", "mouseover" }
+
+local function FindUnit(Name, Loose)
+	if not ( Name ) or ( Name == "" ) then return nil, nil; end
+	local Unit, Actual = GroupUnit(Name, Loose)
+	if ( Unit ) then return Unit, Actual; end
+	for i = 1, #LooseUnits do
+		Actual = MatchName(LooseUnits[i], Name, Loose)
+		if ( Actual ) then return LooseUnits[i], Actual; end
+	end
+	return nil, nil
+end
+
 local RescanFrame = CreateFrame("Frame", nil, UIParent)
 RescanFrame:Hide()
 
@@ -569,7 +604,8 @@ local function NextInQueue()
 		local Name = table.remove(GSL.queue, 1)
 		local Unit = GSL.queued[Name]
 		GSL.queued[Name] = nil
-		if ( Unit ) and ( UnitExists(Unit) ) and ( UnitName(Unit) == Name ) then
+		if not ( Unit ) or not ( MatchName(Unit, Name) ) then Unit = FindUnit(Name); end
+		if ( Unit ) then
 			BeginScan(Name, Unit)
 			Log("queue -> scanning %s (%d still waiting)", tostring(Name), #GSL.queue)
 			return true
@@ -582,9 +618,15 @@ end
 local function DoRescan()
 	local Name, Unit = GSL.scanName, GSL.scanUnit
 	if not ( Name ) or not ( Unit ) then CancelRescan(); NextInQueue(); return; end
-	if not ( UnitExists(Unit) ) or ( UnitName(Unit) ~= Name ) then
-		Log("scan %s abandoned: unit changed", tostring(Name))
-		CancelRescan(); NextInQueue(); return
+	if not ( MatchName(Unit, Name) ) then
+		local Moved = FindUnit(Name)
+		if not ( Moved ) then
+			Log("scan %s abandoned: unit changed", tostring(Name))
+			CancelRescan(); NextInQueue(); return
+		end
+		Log("scan %s: %s no longer points at them, following %s", tostring(Name), tostring(Unit), Moved)
+		Unit = Moved
+		GSL.scanUnit = Moved
 	end
 	GSL.scanTries = GSL.scanTries - 1
 	if ( ScanUnit(Name, Unit) ) then
@@ -642,14 +684,9 @@ end
 local function StableUnit(Name, Unit)
 	if not ( Unit ) then return Unit; end
 	if ( Unit ~= "target" ) and ( Unit ~= "mouseover" ) and ( Unit ~= "focus" ) then return Unit; end
-	for i = 1, 40 do
-		local Candidate = "raid" .. i
-		if ( UnitExists(Candidate) ) and ( UnitName(Candidate) == Name ) then return Candidate; end
-	end
-	for i = 1, 4 do
-		local Candidate = "party" .. i
-		if ( UnitExists(Candidate) ) and ( UnitName(Candidate) == Name ) then return Candidate; end
-	end
+	local Group = GroupUnit(Name)
+	if ( Group ) then return Group; end
+	if ( Unit == "mouseover" ) and ( MatchName("target", Name) ) then return "target"; end
 	return Unit
 end
 
