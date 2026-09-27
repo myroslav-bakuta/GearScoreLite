@@ -848,13 +848,12 @@ function GearScore_HookItem(ItemName, ItemLink, Tooltip)
 
 	local ItemScore, ItemLevel, _, Red, Blue, Green, _, ItemEquipLoc = GearScore_GetItemScore(ItemLink)
 
-	if ( ItemScore < 0 ) then
+	if ( ItemScore < 0 ) or not ( GS_Settings.Item ) then
 		if ( GS_Settings.Level ) and ( ItemLevel ) and ( ItemLevel > 0 ) then
 			Tooltip:AddLine("iLevel " .. ItemLevel)
 		end
 		return
 	end
-	if not ( GS_Settings.Item ) then return; end
 
 	if ( GS_Settings.Level ) and ( ItemLevel ) then
 		Tooltip:AddDoubleLine("GearScore: " .. ItemScore, "(iLevel " .. ItemLevel .. ")", Red, Green, Blue, Red, Green, Blue)
