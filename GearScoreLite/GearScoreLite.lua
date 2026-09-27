@@ -457,7 +457,7 @@ local function ScanUnit(Name, Unit)
 	end
 	GSL.blocked[Name] = nil
 
-	if ( CanInspect(Unit) ) and not ( InspectInUse() ) then
+	if not ( UnitIsUnit(Unit, "player") ) and ( CanInspect(Unit) ) and not ( InspectInUse() ) then
 		local Now = GetTime()
 		if ( GSL.lastInspectName ~= Name ) or ( ( Now - GSL.lastInspectTime ) > 1.5 ) then
 			GSL.lastInspectName = Name
