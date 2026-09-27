@@ -248,6 +248,14 @@ local function ItemReady(Cache, ItemLink)
 	return Known[1], Known[2]
 end
 
+-- The visible-item fields the client fills for anybody in view carry the
+-- permanent enchant but never gems; only a real inspect reply does. A link with
+-- a gem therefore proves the slot came from the inspect, not the transmog.
+local function HasGems(ItemLink)
+	local G1, G2, G3, G4 = ItemLink:match("item:%-?%d+:%-?%d+:(%-?%d+):(%-?%d+):(%-?%d+):(%-?%d+)")
+	return ( G1 ~= nil ) and ( ( G1 ~= "0" ) or ( G2 ~= "0" ) or ( G3 ~= "0" ) or ( G4 ~= "0" ) )
+end
+
 function GearScore_GetScore(Name, Target)
 	if ( Target == nil ) then Target = Name; end
 	if not ( Target ) or not ( UnitIsPlayer(Target) ) then return nil; end
@@ -268,12 +276,13 @@ function GearScore_GetScore(Name, Target)
 
 	local Breakdown = ( GS_Settings and GS_Settings.Debug ) and {} or nil
 
-	local Occupied = 0
+	local Occupied, Gemmed = 0, 0
 	for i = 1, 18 do
 		if ( i ~= 4 ) then
 			local ItemLink = GetInventoryItemLink(Target, i)
 			if ( ItemLink ) then
 				Occupied = Occupied + 1
+				if ( HasGems(ItemLink) ) then Gemmed = Gemmed + 1; end
 				local ReadyRarity, ReadyLevel = ItemReady(Ready, ItemLink)
 				if ( ReadyRarity ) and ( ReadyLevel ) then
 					local TempScore, ItemLevel = GearScore_GetItemScore(ItemLink)
@@ -323,7 +332,7 @@ function GearScore_GetScore(Name, Target)
 		end
 	end
 
-	return floor(GearScore), Average, Complete, Suspect, ItemCount, Occupied, Breakdown
+	return floor(GearScore), Average, Complete, Suspect, ItemCount, Occupied, Breakdown, Gemmed
 end
 
 -- Case folding for player names, done byte by byte on UTF-8. strlower is not
@@ -400,6 +409,7 @@ local SCAN_DEADLINE = 30
 local SCAN_CONFIRM = 6
 local SCAN_SETTLE = 6
 local SCAN_CONFIRM_BUSY = 2
+local SCAN_SETTLE_REAL = 1
 
 local function InspectInUse()
 	if ( InspectFrame ) and ( InspectFrame:IsShown() ) then return true; end
@@ -462,7 +472,9 @@ local function Remember(Name, Entry)
 	if ( type(GS_Cache) ~= "table" ) or not ( Name ) or not ( Entry ) then return; end
 	if not ( Entry.complete ) or ( Entry.suspect ) or ( Entry.unanswered )
 	   or ( Entry.score <= 0 ) then return; end
-	GS_Cache[Name] = { score = Entry.score, ilvl = Entry.ilvl, time = time() }
+	local Saved = GS_Cache[Name]
+	if not ( Entry.real ) and ( type(Saved) == "table" ) and ( Saved.real ) then return; end
+	GS_Cache[Name] = { score = Entry.score, ilvl = Entry.ilvl, time = time(), real = Entry.real or nil }
 end
 
 local function PruneStore()
@@ -536,18 +548,24 @@ local function ScanUnit(Name, Unit)
 		end
 	end
 
-	local Score, Average, Complete, Suspect, Read, Total, Breakdown = GearScore_GetScore(Name, Unit)
+	local Score, Average, Complete, Suspect, Read, Total, Breakdown, Gemmed = GearScore_GetScore(Name, Unit)
 	if not ( Score ) then return true; end
 
+	-- Gems only ever arrive with this player's own inspect data, so a gemmed
+	-- reading needs no reply attribution and is not a transmog guess.
+	local Real = ( ( Gemmed or 0 ) > 0 ) and not ( UnitIsUnit(Unit, "player") )
+	if ( Real ) then Suspect = false; end
+
 	local Unanswered = false
-	if ( Complete ) and not ( UnitIsUnit(Unit, "player") ) and ( GSL.answeredFor ~= Name ) then
+	if ( Complete ) and not ( Real ) and not ( UnitIsUnit(Unit, "player") ) and ( GSL.answeredFor ~= Name ) then
 		Complete = false
 		Unanswered = true
 		Suspect = true
 	end
 
-	Log("scan %s: score=%d ilvl=%d slots=%d/%d %s", tostring(Name), Score, Average,
-	    Read or 0, Total or 0, Complete and "complete" or ( Unanswered and "unanswered" or "partial" ))
+	Log("scan %s: score=%d ilvl=%d slots=%d/%d %s, gems in %d", tostring(Name), Score, Average,
+	    Read or 0, Total or 0, Complete and "complete" or ( Unanswered and "unanswered" or "partial" ),
+	    Gemmed or 0)
 	if ( Breakdown ) then
 		local Items = ItemsText(Breakdown)
 		if ( GSL.lastItemsName ~= Name ) or ( GSL.lastItems ~= Items ) then
@@ -568,6 +586,7 @@ local function ScanUnit(Name, Unit)
 	local Settle = Complete
 	if ( Complete ) and not ( Suspect ) and not ( UnitIsUnit(Unit, "player") ) then
 		local Left = GSL.scanSettle or SCAN_SETTLE
+		if ( Real ) and ( Left > SCAN_SETTLE_REAL ) then Left = SCAN_SETTLE_REAL; end
 		if ( Left > 0 ) then
 			GSL.scanSettle = Left - 1
 			Settle = false
@@ -576,7 +595,7 @@ local function ScanUnit(Name, Unit)
 
 	if ( Complete ) and ( Total ) and ( Total > ( GSL.scanOccupied or 0 ) )
 	   and not ( UnitIsUnit(Unit, "player") ) then
-		GSL.scanSettle = SCAN_SETTLE
+		GSL.scanSettle = Real and SCAN_SETTLE_REAL or SCAN_SETTLE
 		if ( GSL.scanOccupied or 0 ) > 0 then
 			Log("scan %s: slot count rose to %d, waiting for the rest",
 			    tostring(Name), Total)
@@ -607,8 +626,17 @@ local function ScanUnit(Name, Unit)
 		return false
 	end
 
+	if ( Previous ) and ( Previous.real ) and not ( Real ) then
+		Log("scan %s: ignored a reading without gems (%d), the one held has them (%d)",
+		    tostring(Name), Score, Previous.score)
+		return Settle
+	end
+
 	local Improves = ( Previous ) and ( Complete ) and not ( Suspect )
 	                 and ( not ( Previous.complete ) or ( Previous.suspect ) )
+	if ( Real ) and ( Previous ) and not ( Previous.real ) then
+		Improves = true
+	end
 	if ( Previous ) and ( Average ) and ( Previous.ilvl )
 	   and ( Average > Previous.ilvl + 20 ) then
 		Improves = true
@@ -625,10 +653,12 @@ local function ScanUnit(Name, Unit)
 
 	GSL.cache[Name] = { score = Score, ilvl = Average, complete = Complete, suspect = Suspect,
 	                    unanswered = Unanswered, partialSet = GSL.scanGrew or nil,
-	                    read = Read, occupied = Total, time = GetTime() }
+	                    read = Read, occupied = Total, time = GetTime(), real = Real or nil }
 	if ( Complete ) and not ( Suspect ) then
 		GSL.unsure[Name] = nil
-		Remember(Name, GSL.cache[Name])
+		-- A gemless reading may still be the transmog; it is remembered only
+		-- once its scan settles (see DoRescan), your own gear excepted.
+		if ( Real ) or ( UnitIsUnit(Unit, "player") ) then Remember(Name, GSL.cache[Name]); end
 	end
 	if not ( Previous ) or ( Previous.score ~= Score ) then
 		Announce(Name, Score, Average)
@@ -728,8 +758,9 @@ local function DoRescan()
 		local Entry = GSL.cache[Name]
 		if ( Entry ) then
 			Entry.interrupted = nil
-			Log("scan %s done: score=%d ilvl=%d%s", tostring(Name), Entry.score, Entry.ilvl,
-			    Entry.suspect and " (suspect)" or "")
+			Log("scan %s done: score=%d ilvl=%d%s%s", tostring(Name), Entry.score, Entry.ilvl,
+			    Entry.real and ", gems seen" or ", no gems seen", Entry.suspect and " (suspect)" or "")
+			Remember(Name, Entry)
 		end
 		CancelRescan()
 		RefreshTooltip(Name)
@@ -744,6 +775,7 @@ local function DoRescan()
 		elseif ( Entry ) then
 			Entry.settled = true
 			Entry.interrupted = nil
+			Remember(Name, Entry)
 		end
 		CancelRescan()
 		NextInQueue()
@@ -855,7 +887,13 @@ local function Track(Name, Unit, Force)
 	if ( GSL.queued[Name] ) then GSL.queued[Name] = Unit; return; end
 
 	if not ( GSL.scanName ) then
-		if not ( ScanUnit(Name, Unit) ) then BeginScan(Name, Unit); end
+		if ( GSL.parked[Name] ) then
+			-- Restore the paused counters first, so this reading counts towards them.
+			BeginScan(Name, Unit)
+			DoRescan()
+		elseif not ( ScanUnit(Name, Unit) ) then
+			BeginScan(Name, Unit)
+		end
 		return
 	end
 
@@ -1149,7 +1187,7 @@ local function DebugSnapshot(Reason)
 	for i = 1, min(#Names, 300) do
 		local Entry = GSL.cache[Names[i]]
 		local Flags = {}
-		for _, Flag in ipairs({ "complete", "suspect", "unanswered", "settled", "interrupted", "partialSet" }) do
+		for _, Flag in ipairs({ "complete", "real", "suspect", "unanswered", "settled", "interrupted", "partialSet" }) do
 			if ( Entry[Flag] ) then Flags[#Flags + 1] = Flag; end
 		end
 		DebugWrite(format("  %s score=%d ilvl=%d slots=%s/%s age=%ds %s", Names[i], Entry.score, Entry.ilvl,
