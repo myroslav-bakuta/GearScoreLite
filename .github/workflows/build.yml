@@ -200,7 +200,11 @@ jobs:
             echo "No previous tag found; generating notes from the start."
           fi
 
+          # --target pins the new tag to the commit that was built. Without it
+          # gh tags the default branch head, which differs when the run was
+          # dispatched from another branch or main moved during the build.
           gh release create "$version" \
+            --target "$GITHUB_SHA" \
             --title "GearScoreLite: Reborn $version" \
             "${notes_args[@]}" \
             "${{ steps.package.outputs.name }}.zip"
