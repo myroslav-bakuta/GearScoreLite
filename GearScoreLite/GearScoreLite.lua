@@ -650,9 +650,12 @@ end
 local function UpdatePlayer()
 	local Score, Average, Complete = GearScore_GetScore("player")
 	if ( Score ) then
+		local Changed = ( Score ~= GSL.player.score ) or ( Average ~= GSL.player.ilvl )
+		local Name = UnitName("player")
 		GSL.player.score = Score
 		GSL.player.ilvl = Average
-		GSL.cache[UnitName("player")] = { score = Score, ilvl = Average, complete = Complete, suspect = false, time = GetTime() }
+		GSL.cache[Name] = { score = Score, ilvl = Average, complete = Complete, suspect = false, time = GetTime() }
+		if ( Changed ) and ( Name ) then Announce(Name, Score, Average); end
 	end
 	return Complete
 end
