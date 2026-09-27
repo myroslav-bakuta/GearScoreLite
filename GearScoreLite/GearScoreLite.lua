@@ -43,33 +43,32 @@ local GSL = {
 	blocked = {},
 	unsure = {},
 	log = {},
+	logTime = {},
 	logNext = 1,
 }
 
 local LOG_MAX = 120
 
-local function Stamp()
-	return date("%H:%M:%S")
-end
-
 local function Log(Format, ...)
 	local Ok, Text = pcall(format, Format, ...)
 	if not ( Ok ) then Text = tostring(Format); end
-	Text = Stamp() .. "  " .. Text
 
+	local Now = time()
 	GSL.log[GSL.logNext] = Text
+	GSL.logTime[GSL.logNext] = Now
 	GSL.logNext = ( GSL.logNext % LOG_MAX ) + 1
 
 	if ( GS_Settings ) and ( GS_Settings.Debug ) then
-		print("|cff66ccffGS|r " .. Text)
+		print("|cff66ccffGS|r " .. date("%H:%M:%S", Now) .. "  " .. Text)
 	end
 end
 
 local function LogLines()
 	local Lines = {}
 	for i = 0, LOG_MAX - 1 do
-		local Entry = GSL.log[( ( GSL.logNext - 1 + i ) % LOG_MAX ) + 1]
-		if ( Entry ) then Lines[#Lines + 1] = Entry; end
+		local Index = ( ( GSL.logNext - 1 + i ) % LOG_MAX ) + 1
+		local Entry = GSL.log[Index]
+		if ( Entry ) then Lines[#Lines + 1] = date("%H:%M:%S", GSL.logTime[Index]) .. "  " .. Entry; end
 	end
 	return Lines
 end
