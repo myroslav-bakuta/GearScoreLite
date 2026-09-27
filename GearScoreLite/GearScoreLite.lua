@@ -1358,6 +1358,8 @@ EventFrame:SetScript("OnEvent", function(self, event, arg1)
 		end
 
 	elseif ( event == "PLAYER_TARGET_CHANGED" ) then
+		if not ( GS_Settings ) or not ( GS_Settings.Player ) then return; end
+		if ( GS_Settings.HideInCombat ) and ( GSL.inCombat ) then return; end
 		if ( UnitExists("target") ) and ( UnitIsPlayer("target") ) then Track(UnitName("target"), "target"); end
 
 	elseif ( event == "ADDON_LOADED" ) and ( arg1 == "GearScoreLite" ) then
