@@ -70,7 +70,7 @@ The game only hands over a player's gear while some unit token points at them: y
 
 Must Target mode stops GearScore from inspecting anyone you haven't targeted: you click the person, then you see their score. It cuts tooltip clutter and UI lag. It is off by default, so everyone is inspected on mouseover.
 
-Player names in `/gs rescan` ignore letter case for Latin names, so `/gs rescan arthas` finds `Arthas`.
+Player names in `/gs rescan` ignore letter case, Cyrillic included: `/gs rescan мирослав` finds `Мирослав`.
 
 ## Reporting a problem
 
