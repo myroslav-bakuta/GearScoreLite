@@ -694,9 +694,8 @@ local function Track(Name, Unit, Force)
 	if not ( Unit ) or not ( UnitExists(Unit) ) or not ( UnitIsPlayer(Unit) ) then return; end
 	Name = Name or UnitName(Unit)
 	if not ( Name ) then return; end
-	Unit = StableUnit(Name, Unit)
-
 	if not ( Force ) and ( IsFresh(Name) ) then return; end
+	Unit = StableUnit(Name, Unit)
 
 	local Stale = GSL.cache[Name]
 	if ( Stale ) and ( Stale.suspect or Stale.settled ) then
