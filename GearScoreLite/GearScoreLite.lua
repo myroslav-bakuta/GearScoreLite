@@ -89,12 +89,13 @@ local function ToSRGB(C)
 	return 1.055 * (C ^ (1 / 2.4)) - 0.055
 end
 
-local GradientCache, GradientCacheKey = nil, nil
+local GradientCache, GradientCacheStops, GradientCacheCount = nil, nil, nil
 
 local function BuildGradient()
 	local Stops = ( GS_Gradient and GS_Gradient.Stops ) or {}
-	local Key = table.concat(Stops, ",")
-	if ( GradientCache ) and ( GradientCacheKey == Key ) then return GradientCache; end
+	if ( GradientCache ) and ( GradientCacheStops == Stops ) and ( GradientCacheCount == #Stops ) then
+		return GradientCache
+	end
 
 	local Built = {}
 	for i = 1, #Stops do
@@ -103,7 +104,7 @@ local function BuildGradient()
 	end
 	if ( #Built < 2 ) then return nil; end
 
-	GradientCache, GradientCacheKey = Built, Key
+	GradientCache, GradientCacheStops, GradientCacheCount = Built, Stops, #Stops
 	return Built
 end
 
