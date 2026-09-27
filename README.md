@@ -52,7 +52,7 @@ All of `/gs`, `/gset` and `/gearscore` work. Running `/gs` with no argument prin
 
 | Command | Does |
 | --- | --- |
-| `/gs player` (or `show`) | Toggle player scores in tooltips |
+| `/gs player` (or `show`) | Toggle player scores in tooltips; while off, nobody is inspected automatically |
 | `/gs item` | Toggle item scores |
 | `/gs level` | Toggle item levels |
 | `/gs target` | Toggle "Must Target" mode |
@@ -80,6 +80,8 @@ If a score is missing or looks wrong and you want to know why:
 | `/gs debug` | Toggle live scan logging in chat |
 | `/gs queue` | Show the pending inspect queue |
 
+Names in these commands ignore letter case for Latin names: `/gs why arthas` finds `Arthas`.
+
 The log is recorded even while `/gs debug` is off, so `/gs dump` works right after something goes wrong without having to reproduce it. Debug output is forced off on every load.
 
 ## API
@@ -87,18 +89,19 @@ The log is recorded even while `/gs debug` is off, so `/gs dump` works right aft
 For WeakAuras and other addons:
 
 ```lua
-GearScoreLite.GetScore(unit)      -- score, averageItemLevel, complete, suspect
-GearScoreLite.GetCached(name)     -- score, averageItemLevel, ageInSeconds, suspect
+GearScoreLite.GetScore(unit)      -- score, averageItemLevel, complete, suspect, slotsRead, slotsOccupied
+GearScoreLite.GetCached(name)     -- score, averageItemLevel, ageInSeconds, suspect, rememberedAt
 GearScoreLite.Request(unit)       -- queue an async inspect
+GearScoreLite.Forget(name)        -- drop this session's reading, so the next look re-reads it
 GearScoreLite.GetPlayer()         -- your own score, averageItemLevel
 GearScoreLite.RegisterCallback(f) -- f(name, score, averageItemLevel)
 ```
 
-`GetScore()` returns `nil` if the unit is not a player. `suspect` means a slot looks transmogrified, so the score is a lower bound rather than a reading. `GetCached()` reads the cache only and never inspects.
+`GetScore()` returns `nil` if the unit is not a player. `suspect` means a slot looks transmogrified, so the score is a lower bound rather than a reading. `GetCached()` reads the cache only and never inspects. `rememberedAt` is set (a `time()` stamp) when the number comes from a previous session rather than a live read; `ageInSeconds` is then 0.
 
 `Request()` always re-reads, even when a fresh score is already cached: an explicit call is treated as a deliberate request, unlike the automatic tooltip path, which leaves a recent score alone.
 
-The `GEARSCORELITE_UPDATE` event fires with `(name, score, averageItemLevel)` whenever a score changes - use it as a custom WeakAuras trigger. Prefer `GetCached()` in anything that runs every frame; `GetScore()` walks all 18 inventory slots on each call.
+The `GEARSCORELITE_UPDATE` event fires with `(name, score, averageItemLevel)` whenever a score changes, your own included - use it as a custom WeakAuras trigger. Prefer `GetCached()` in anything that runs every frame; `GetScore()` walks all 18 inventory slots on each call.
 
 ## Removed from the original
 
