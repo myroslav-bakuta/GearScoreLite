@@ -46,6 +46,7 @@ local GSL = {
 	logTime = {},
 	logNext = 1,
 	parked = {},
+	yields = {},
 	lastPrune = 0,
 }
 
@@ -688,9 +689,16 @@ local function CancelRescan()
 	GSL.scanSettle = SCAN_SETTLE
 	GSL.scanOccupied = 0
 	GSL.scanGrew = false
+	GSL.scanBlockedTicks = 0
 end
 
 local PARK_TTL = 120
+
+-- Obstacles that clear up by themselves later (walking into range, coming
+-- online); a scan held up by one gives the slot to whoever is waiting.
+local Unreachable = { ["range"] = true, ["cannotinspect"] = true, ["offline"] = true }
+local BLOCKED_YIELD = 2
+local YIELD_MAX = 3
 
 local function Park(Name)
 	GSL.parked[Name] = { confirm = GSL.scanConfirm, settle = GSL.scanSettle, occupied = GSL.scanOccupied,
@@ -709,6 +717,7 @@ local function BeginScan(Name, Unit)
 	GSL.scanSettle = SCAN_SETTLE
 	GSL.scanOccupied = 0
 	GSL.scanGrew = false
+	GSL.scanBlockedTicks = 0
 
 	local Parked = GSL.parked[Name]
 	GSL.parked[Name] = nil
@@ -724,19 +733,45 @@ local function BeginScan(Name, Unit)
 end
 
 local function NextInQueue()
+	local Budget = #GSL.queue
 	while ( #GSL.queue > 0 ) do
 		local Name = table.remove(GSL.queue, 1)
 		local Unit = GSL.queued[Name]
 		GSL.queued[Name] = nil
+		Budget = Budget - 1
 		if not ( Unit ) or not ( MatchName(Unit, Name) ) then Unit = FindUnit(Name); end
-		if ( Unit ) then
+		if not ( Unit ) then
+			Log("queue: dropped stale entry %s", tostring(Name))
+		elseif ( Budget > 0 ) and ( Unreachable[Obstacle(Unit) or ""] ) then
+			-- Out of reach right now; somebody later in the line may not be.
+			GSL.queue[#GSL.queue + 1] = Name
+			GSL.queued[Name] = Unit
+			Log("queue: %s is out of reach, trying the next one", tostring(Name))
+		else
 			BeginScan(Name, Unit)
 			Log("queue -> scanning %s (%d still waiting)", tostring(Name), #GSL.queue)
 			return true
 		end
-		Log("queue: dropped stale entry %s", tostring(Name))
 	end
 	return false
+end
+
+local function Yield(Name, Unit, Reason)
+	local Count = ( GSL.yields[Name] or 0 ) + 1
+	Park(Name)
+	CancelRescan()
+	if ( Count <= YIELD_MAX ) then
+		GSL.yields[Name] = Count
+		GSL.queue[#GSL.queue + 1] = Name
+		GSL.queued[Name] = Unit
+		Log("scan %s yields the slot: %s, back of the queue (%d waiting)", tostring(Name),
+		    ObstacleText[Reason] or Reason, #GSL.queue)
+	else
+		GSL.yields[Name] = nil
+		Log("scan %s dropped: still %s after %d turns, resumes on the next hover", tostring(Name),
+		    ObstacleText[Reason] or Reason, YIELD_MAX)
+	end
+	NextInQueue()
 end
 
 local function DoRescan()
@@ -754,7 +789,19 @@ local function DoRescan()
 		GSL.scanUnit = Moved
 	end
 	GSL.scanTries = GSL.scanTries - 1
-	if ( ScanUnit(Name, Unit) ) then
+	local Finished = ScanUnit(Name, Unit)
+	local Reason = GSL.blocked[Name]
+	if not ( Finished ) and ( Unreachable[Reason or ""] ) then
+		GSL.scanBlockedTicks = ( GSL.scanBlockedTicks or 0 ) + 1
+		if ( GSL.scanBlockedTicks >= BLOCKED_YIELD ) and ( #GSL.queue > 0 ) then
+			Yield(Name, Unit, Reason)
+			return
+		end
+	else
+		GSL.scanBlockedTicks = 0
+	end
+	if ( Finished ) then
+		GSL.yields[Name] = nil
 		local Entry = GSL.cache[Name]
 		if ( Entry ) then
 			Entry.interrupted = nil
@@ -767,6 +814,7 @@ local function DoRescan()
 		NextInQueue()
 	elseif ( GSL.scanTries <= 0 ) then
 		Log("scan %s gave up: %d slots read, budget exhausted", tostring(Name), GSL.scanRead or 0)
+		GSL.yields[Name] = nil
 		local Entry = GSL.cache[Name]
 		if ( Entry ) and ( Entry.unanswered ) then
 			Log("scan %s: discarding an unanswered reading (%d) rather than settling it",
@@ -851,7 +899,7 @@ local function PruneSession()
 			Dropped = Dropped + 1
 		end
 	end
-	for _, Map in ipairs({ GSL.blocked, GSL.unsure }) do
+	for _, Map in ipairs({ GSL.blocked, GSL.unsure, GSL.yields }) do
 		for Name in pairs(Map) do
 			if not ( GSL.cache[Name] ) and not ( Busy(Name) ) then Map[Name] = nil; end
 		end
@@ -1416,6 +1464,7 @@ GearScoreLite = {
 		GSL.cache[name] = nil
 		GSL.unsure[name] = nil
 		GSL.parked[name] = nil
+		GSL.yields[name] = nil
 	end,
 
 	GetState = function(name)
