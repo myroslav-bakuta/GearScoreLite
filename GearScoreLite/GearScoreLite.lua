@@ -50,6 +50,25 @@ local GSL = {
 }
 
 local LOG_MAX = 120
+local DEBUG_MAX = 5000
+local DEBUG_TRIM = 500
+
+local function Debugging()
+	return ( GS_Settings ) and ( GS_Settings.Debug ) and true or false
+end
+
+local function DebugWrite(Text)
+	if ( type(GS_DebugLog) ~= "table" ) or ( type(GS_DebugLog.lines) ~= "table" ) then
+		GS_DebugLog = { lines = {} }
+	end
+	local Lines = GS_DebugLog.lines
+	Lines[#Lines + 1] = Text
+	if ( #Lines > DEBUG_MAX + DEBUG_TRIM ) then
+		local Kept = {}
+		for i = #Lines - DEBUG_MAX + 1, #Lines do Kept[#Kept + 1] = Lines[i]; end
+		GS_DebugLog.lines = Kept
+	end
+end
 
 local function Log(Format, ...)
 	local Ok, Text = pcall(format, Format, ...)
@@ -60,9 +79,13 @@ local function Log(Format, ...)
 	GSL.logTime[GSL.logNext] = Now
 	GSL.logNext = ( GSL.logNext % LOG_MAX ) + 1
 
-	if ( GS_Settings ) and ( GS_Settings.Debug ) then
-		print("|cff66ccffGS|r " .. date("%H:%M:%S", Now) .. "  " .. Text)
+	if ( Debugging() ) then
+		DebugWrite(format("%s %9.2f  %s", date("%Y-%m-%d %H:%M:%S", Now), GetTime(), Text))
 	end
+end
+
+local function Trace(...)
+	if ( Debugging() ) then Log(...); end
 end
 
 local function LogLines()
@@ -448,6 +471,16 @@ local function DisplayEntry(Name)
 	         remembered = Saved.time, time = GetTime() }
 end
 
+local function ItemsText(Breakdown)
+	local Parts = {}
+	for i = 1, #Breakdown do
+		local Slot = Breakdown[i]
+		local Item = tostring(Slot.link):match("|H(item:[%-%d:]+)|h") or tostring(Slot.link)
+		Parts[#Parts + 1] = format("%d=%s@%d/%d", Slot.slot, Item, Slot.ilvl, Slot.score)
+	end
+	return table.concat(Parts, " ")
+end
+
 local function ScanUnit(Name, Unit)
 	local Blocked = Obstacle(Unit)
 	if ( Blocked ) then
@@ -483,7 +516,14 @@ local function ScanUnit(Name, Unit)
 	end
 
 	Log("scan %s: score=%d ilvl=%d slots=%d/%d %s", tostring(Name), Score, Average,
-	    Read or 0, Total or 0, Complete and "complete" or "partial")
+	    Read or 0, Total or 0, Complete and "complete" or ( Unanswered and "unanswered" or "partial" ))
+	if ( Breakdown ) then
+		local Items = ItemsText(Breakdown)
+		if ( GSL.lastItemsName ~= Name ) or ( GSL.lastItems ~= Items ) then
+			GSL.lastItemsName, GSL.lastItems = Name, Items
+			Log("scan %s items: %s", tostring(Name), Items)
+		end
+	end
 
 	if ( Name == GSL.scanName ) and ( Read ) and ( Read > ( GSL.scanRead or 0 ) ) then
 		GSL.scanRead = Read
@@ -554,8 +594,7 @@ local function ScanUnit(Name, Unit)
 
 	GSL.cache[Name] = { score = Score, ilvl = Average, complete = Complete, suspect = Suspect,
 	                    unanswered = Unanswered, partialSet = GSL.scanGrew or nil,
-	                    read = Read, occupied = Total, time = GetTime(),
-	                    breakdown = GS_Settings.Debug and Breakdown or nil }
+	                    read = Read, occupied = Total, time = GetTime() }
 	if ( Complete ) and not ( Suspect ) then
 		GSL.unsure[Name] = nil
 		Remember(Name, GSL.cache[Name])
@@ -688,7 +727,10 @@ local function UpdatePlayer()
 		GSL.player.score = Score
 		GSL.player.ilvl = Average
 		GSL.cache[Name] = { score = Score, ilvl = Average, complete = Complete, suspect = false, time = GetTime() }
-		if ( Changed ) and ( Name ) then Announce(Name, Score, Average); end
+		if ( Changed ) and ( Name ) then
+			Trace("own score: %d, ilvl %d, %s", Score, Average, Complete and "complete" or "items still loading")
+			Announce(Name, Score, Average)
+		end
 	end
 	return Complete
 end
@@ -1016,282 +1058,72 @@ local function ApplyAnchor()
 	if ( Unlocked ) then AnchorHighlight:Show() else AnchorHighlight:Hide() end
 end
 
-local DumpFrame
-
-local function BuildDumpFrame()
-	if ( DumpFrame ) then return DumpFrame; end
-
-	local Frame = CreateFrame("Frame", "GearScoreLiteDumpFrame", UIParent)
-	Frame:SetWidth(560)
-	Frame:SetHeight(420)
-	Frame:SetPoint("CENTER")
-	Frame:SetFrameStrata("DIALOG")
-	Frame:SetBackdrop({
-		bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
-		edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
-		tile = true, tileSize = 32, edgeSize = 32,
-		insets = { left = 11, right = 12, top = 12, bottom = 11 },
-	})
-	Frame:SetMovable(true)
-	Frame:EnableMouse(true)
-	Frame:RegisterForDrag("LeftButton")
-	Frame:SetScript("OnDragStart", function(self) self:StartMoving() end)
-	Frame:SetScript("OnDragStop", function(self) self:StopMovingOrSizing() end)
-
-	local Title = Frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-	Title:SetPoint("TOP", Frame, "TOP", 0, -16)
-	Title:SetText("GearScoreLite -- scan log")
-
-	local Hint = Frame:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-	Hint:SetPoint("TOP", Title, "BOTTOM", 0, -2)
-	Hint:SetText("Ctrl+A then Ctrl+C to copy, Escape to close")
-
-	local Scroll = CreateFrame("ScrollFrame", "GearScoreLiteDumpScroll", Frame, "UIPanelScrollFrameTemplate")
-	Scroll:SetPoint("TOPLEFT", Frame, "TOPLEFT", 18, -52)
-	Scroll:SetPoint("BOTTOMRIGHT", Frame, "BOTTOMRIGHT", -36, 40)
-
-	local Edit = CreateFrame("EditBox", "GearScoreLiteDumpEdit", Scroll)
-	Edit:SetMultiLine(true)
-	Edit:SetAutoFocus(false)
-	Edit:SetFontObject(ChatFontNormal)
-	Edit:SetWidth(490)
-	Edit:SetScript("OnEscapePressed", function() Frame:Hide() end)
-	Scroll:SetScrollChild(Edit)
-
-	local Close = CreateFrame("Button", nil, Frame, "UIPanelButtonTemplate")
-	Close:SetWidth(90)
-	Close:SetHeight(22)
-	Close:SetPoint("BOTTOM", Frame, "BOTTOM", 0, 14)
-	Close:SetText("Close")
-	Close:SetScript("OnClick", function() Frame:Hide() end)
-
-	Frame.edit = Edit
-	if ( type(UISpecialFrames) == "table" ) then tinsert(UISpecialFrames, "GearScoreLiteDumpFrame"); end
-	DumpFrame = Frame
-	return Frame
-end
-
-local function DumpText()
-	local Out = {}
-	local Version = GetAddOnMetadata and GetAddOnMetadata("GearScoreLite", "Version") or "?"
-	Out[#Out + 1] = "GearScoreLite: Reborn " .. tostring(Version) .. " -- scan log"
-	Out[#Out + 1] = format("player: %s  score=%d  ilvl=%d",
-		tostring(UnitName("player")), GSL.player.score, GSL.player.ilvl)
-	Out[#Out + 1] = format("settings: colour=%s status=%s combat=%s target=%s",
-		tostring(GS_Settings and GS_Settings.ColorMode),
-		tostring(GS_Settings and GS_Settings.Status),
-		tostring(GS_Settings and GS_Settings.HideInCombat),
-		tostring(GS_Settings and GS_Settings.MustTarget))
-	Out[#Out + 1] = format("active scan: %s   queued: %d   inspect window open: %s",
-		tostring(GSL.scanName), #GSL.queue, tostring(InspectInUse()))
-
-	local Cached = 0
-	for _ in pairs(GSL.cache) do Cached = Cached + 1; end
-	Out[#Out + 1] = format("cached scores: %d", Cached)
-	Out[#Out + 1] = ""
-	Out[#Out + 1] = "--- log (oldest first) ---"
-
-	local Lines = LogLines()
-	if ( #Lines == 0 ) then
-		Out[#Out + 1] = "(empty -- hover some players first)"
-	else
-		for i = 1, #Lines do Out[#Out + 1] = Lines[i]; end
-	end
-	return table.concat(Out, "\n")
-end
-
-local function ShowDump()
-	local Frame = BuildDumpFrame()
-	Frame.edit:SetText(DumpText())
-	Frame.edit:SetCursorPosition(0)
-	Frame:Show()
-end
-
-local SlotNames = {
-	[1] = "head", [2] = "neck", [3] = "shoulder", [5] = "chest", [6] = "waist",
-	[7] = "legs", [8] = "feet", [9] = "wrist", [10] = "hands", [11] = "finger1",
-	[12] = "finger2", [13] = "trinket1", [14] = "trinket2", [15] = "back",
-	[16] = "main hand", [17] = "off hand", [18] = "ranged",
-}
-
-local function UnresolvedSlots(Unit)
-	local Missing = {}
-	for i = 1, 18 do
-		if ( i ~= 4 ) then
-			local ItemLink = GetInventoryItemLink(Unit, i)
-			if ( ItemLink ) then
-				local _, _, Rarity, Level = GetItemInfo(ItemLink)
-				if not ( Rarity ) or not ( Level ) then
-					Missing[#Missing + 1] = SlotNames[i] or ( "slot " .. i )
-				end
-			end
-		end
-	end
-	return Missing
-end
-
-local function MogOutliers(Unit)
-	local Levels, BySlot = {}, {}
-	for i = 1, 15 do
-		if ( i ~= 4 ) then
-			local ItemLink = GetInventoryItemLink(Unit, i)
-			if ( ItemLink ) then
-				local _, _, Rarity, Level = GetItemInfo(ItemLink)
-				if ( Rarity ) and ( Level ) and ( Level > 0 ) then
-					Levels[#Levels + 1] = Level
-					BySlot[#BySlot + 1] = { slot = i, ilvl = Level }
-				end
-			end
-		end
-	end
-	if ( #Levels < 5 ) then return nil; end
-	local Median = MedianOf(Levels)
-	if not ( Median ) then return nil; end
-
-	local Low = {}
-	for i = 1, #BySlot do
-		local Entry = BySlot[i]
-		if ( Entry.ilvl < Median * MOG_RATIO ) and ( Median - Entry.ilvl >= MOG_FLOOR ) then
-			Low[#Low + 1] = ( SlotNames[Entry.slot] or ( "slot " .. Entry.slot ) ) .. " (" .. Entry.ilvl .. ")"
-		end
-	end
-	return Median, Low
-end
-
-local function KnownName(Query)
-	local Saved = ( type(GS_Cache) == "table" ) and GS_Cache or {}
-	if ( GSL.cache[Query] ) or ( Saved[Query] ) then return Query; end
-	local Lower = strlower(Query)
-	for Name in pairs(GSL.cache) do
-		if ( strlower(Name) == Lower ) then return Name; end
-	end
-	for Name in pairs(Saved) do
-		if ( type(Name) == "string" ) and ( strlower(Name) == Lower ) then return Name; end
-	end
-	return Query
-end
-
 local function ResolveByName(Query)
 	if ( Query ) and ( Query ~= "" ) then
 		local Unit, Actual = FindUnit(Query, true)
 		if ( Unit ) then return Actual, Unit; end
-		return KnownName(Query), nil
+		return Query, nil
 	end
 	if ( UnitExists("target") ) then return UnitName("target"), "target"; end
 	if ( UnitExists("mouseover") ) then return UnitName("mouseover"), "mouseover"; end
 	return nil, nil
 end
 
-local function ShowGear(Query)
-	local Name = ResolveByName(Query)
-	if not ( Name ) then
-		print("GearScore -- /gs gear <name>, or target somebody first.")
-		return
+local function DebugSession(Reason, FlushRing)
+	local Version = GetAddOnMetadata and GetAddOnMetadata("GearScoreLite", "Version") or "?"
+	DebugWrite("")
+	DebugWrite(format("==== GearScoreLite %s, %s, %s ====", tostring(Version), date("%Y-%m-%d %H:%M:%S"), Reason))
+	if ( GetBuildInfo ) then
+		local ClientVersion, Build = GetBuildInfo()
+		DebugWrite(format("client %s (%s), locale %s, realm %s", tostring(ClientVersion), tostring(Build),
+			tostring(GetLocale and GetLocale()), tostring(GetRealmName and GetRealmName())))
 	end
+	local _, Class = UnitClass("player")
+	DebugWrite(format("player %s, %s, level %s, score %d, ilvl %d", tostring(UnitName("player")),
+		tostring(Class), tostring(UnitLevel and UnitLevel("player")), GSL.player.score, GSL.player.ilvl))
 
-	local Entry = GSL.cache[Name]
-	if not ( Entry ) then
-		print("|cff66ccffGearScore|r -- no scan recorded for " .. tostring(Name) .. " yet. Hover them first.")
-		return
-	end
-	if not ( Entry.breakdown ) or ( #Entry.breakdown == 0 ) then
-		if not ( GS_Settings.Debug ) then
-			print("|cff66ccffGearScore|r -- the per-slot breakdown is only recorded while debugging,")
-			print("  because it is a lot of memory to hold for a whole raid. Run /gs debug, then")
-			print("  hover " .. tostring(Name) .. " again and this will have something to show.")
-		else
-			print("|cff66ccffGearScore|r -- nothing readable in " .. tostring(Name) .. "'s slots on the last scan.")
+	local Keys, Parts = {}, {}
+	for Key in pairs(GS_Settings) do Keys[#Keys + 1] = Key; end
+	sort(Keys)
+	for i = 1, #Keys do Parts[#Parts + 1] = Keys[i] .. "=" .. tostring(GS_Settings[Keys[i]]); end
+	DebugWrite("settings: " .. table.concat(Parts, " "))
+
+	if ( GetNumAddOns ) and ( GetAddOnInfo ) and ( IsAddOnLoaded ) then
+		local Loaded = {}
+		for i = 1, GetNumAddOns() do
+			local AddOn = GetAddOnInfo(i)
+			if ( AddOn ) and ( IsAddOnLoaded(AddOn) ) then Loaded[#Loaded + 1] = AddOn; end
 		end
-		return
+		DebugWrite(format("addons loaded (%d): %s", #Loaded, table.concat(Loaded, ", ")))
 	end
 
-	print(format("|cff66ccffGearScore|r -- what the last scan read for %s (score %d, iLevel %d, %d seconds ago):",
-		tostring(Name), Entry.score, Entry.ilvl, floor(GetTime() - Entry.time)))
-	for i = 1, #Entry.breakdown do
-		local Slot = Entry.breakdown[i]
-		print(format("  %-10s iLevel %-4d GS %-5d %s",
-			SlotNames[Slot.slot] or ( "slot " .. Slot.slot ),
-			Slot.ilvl, Slot.score, tostring(Slot.link)))
-	end
-	if ( Entry.suspect ) then
-		print("  Slots whose item is far below the rest are what the client received;")
-		print("  on a transmog realm that IS the cosmetic item, not the real one.")
+	if ( FlushRing ) then
+		local Lines = LogLines()
+		if ( #Lines > 0 ) then
+			DebugWrite(format("-- %d lines logged before debug was switched on --", #Lines))
+			for i = 1, #Lines do DebugWrite(Lines[i]); end
+			DebugWrite("-- live from here --")
+		end
 	end
 end
 
-local function Explain(Query)
-	local Name, Unit = ResolveByName(Query)
-	if not ( Name ) then
-		print("GearScore -- /gs why <name>, or target somebody first.")
-		return
-	end
-
-	print("|cff66ccffGearScore|r -- report for " .. tostring(Name) .. ":")
-
-	if ( Unit ) then
-		local Blocked = Obstacle(Unit)
-		if ( Blocked ) then
-			print("  blocked: " .. ( ObstacleText[Blocked] or Blocked ))
-		else
-			print("  inspectable: yes")
+local function DebugSnapshot(Reason)
+	local Names, Parked = {}, 0
+	for Name in pairs(GSL.cache) do Names[#Names + 1] = Name; end
+	for _ in pairs(GSL.parked) do Parked = Parked + 1; end
+	sort(Names)
+	DebugWrite(format("-- session cache at %s: %d players, scanning %s, queued %d, paused %d --",
+		Reason, #Names, tostring(GSL.scanName), #GSL.queue, Parked))
+	local Now = GetTime()
+	for i = 1, min(#Names, 300) do
+		local Entry = GSL.cache[Names[i]]
+		local Flags = {}
+		for _, Flag in ipairs({ "complete", "suspect", "unanswered", "settled", "interrupted", "partialSet" }) do
+			if ( Entry[Flag] ) then Flags[#Flags + 1] = Flag; end
 		end
-	else
-		print("  no unit token in range (not in your raid, party, target, focus or mouseover)")
-	end
-
-	local Entry = GSL.cache[Name]
-	if ( Entry ) then
-		print(format("  cached: score %d, ilvl %d, %s, %d seconds old",
-			Entry.score, Entry.ilvl, Entry.complete and "complete" or "partial",
-			floor(GetTime() - Entry.time)))
-		if ( Entry.occupied ) then
-			print(format("  that scan read %d of %d equipped slots", Entry.read or 0, Entry.occupied))
-		end
-		if ( Entry.suspect ) then
-			print("  transmog: slots far below this character's median iLevel, so the")
-			print("            real gear is better than this score. /gs gear lists the slots.")
-		end
-	else
-		print("  cached: nothing yet")
-	end
-
-	local Saved = ( type(GS_Cache) == "table" ) and GS_Cache[Name] or nil
-	if ( Saved ) then
-		print(format("  remembered from an earlier session: score %d, ilvl %d, %d hours old",
-			Saved.score, Saved.ilvl or 0, floor(( time() - Saved.time ) / 3600)))
-	end
-
-	if ( GSL.scanName == Name ) then
-		print(format("  currently scanning, %d tries left", GSL.scanTries))
-	elseif ( GSL.queued[Name] ) then
-		print("  waiting in the inspect queue")
-	end
-
-	if ( GSL.answeredFor == Name ) then
-		print("  inspect data: the client is holding this player's gear")
-	elseif ( GSL.answeredFor ) then
-		print("  inspect data: the client is holding " .. tostring(GSL.answeredFor)
-		      .. "'s gear, not this player's")
-	else
-		print("  inspect data: none held yet (request in flight)")
-	end
-
-	if ( Unit ) then
-		local _, _, _, _, Read, Occupied = GearScore_GetScore(Name, Unit)
-		if ( Occupied ) and ( Occupied > 0 ) then
-			print(format("  visible gear right now: %d of %d slots readable", Read or 0, Occupied))
-			local Missing = UnresolvedSlots(Unit)
-			if ( #Missing > 0 ) then
-				print("  unresolved, item data still arriving: " .. table.concat(Missing, ", "))
-			end
-			local Median, Low = MogOutliers(Unit)
-			if ( Median ) and ( Low ) and ( #Low > 0 ) then
-				print(format("  median armour iLevel %d; far below it: %s", Median, table.concat(Low, ", ")))
-			end
-		else
-			print("  no inspect data held right now -- the client keeps only the most")
-			print("  recent inspect, so this says nothing about the score above")
-		end
+		DebugWrite(format("  %s score=%d ilvl=%d slots=%s/%s age=%ds %s", Names[i], Entry.score, Entry.ilvl,
+			tostring(Entry.read or "-"), tostring(Entry.occupied or "-"), floor(Now - ( Entry.time or Now )),
+			table.concat(Flags, ",")))
 	end
 end
 
@@ -1313,11 +1145,22 @@ function GS_MANSET(Command)
 	elseif ( Command == "target" ) then Toggle("MustTarget", "Must Target")
 	elseif ( Command == "combat" ) then Toggle("HideInCombat", "Hide In Combat")
 	elseif ( Command == "status" ) then Toggle("Status", "Missing Score Reason")
+	elseif ( Command == "debug clear" ) then
+		GS_DebugLog = { lines = {} }
+		if ( GS_Settings.Debug ) then DebugSession("log cleared", false); end
+		print("GearScore -- debug log cleared.")
 	elseif ( Command == "debug" ) then
-		Toggle("Debug", "Debug Logging")
-		if ( GS_Settings.Debug ) then print("GearScore -- /gs dump opens the log in a copyable window."); end
-	elseif ( Verb == "why" ) then Explain(strtrim(RawArgs))
-	elseif ( Verb == "gear" ) then ShowGear(strtrim(RawArgs))
+		if ( GS_Settings.Debug ) then
+			DebugSnapshot("debug switched off")
+			DebugWrite(format("==== debug switched off, %s ====", date("%Y-%m-%d %H:%M:%S")))
+			GS_Settings.Debug = false
+			print("GearScore -- debug logging: Off.")
+		else
+			GS_Settings.Debug = true
+			DebugSession("switched on", true)
+			print("GearScore -- debug logging: On. The log is saved to WTF\\Account\\<account>\\SavedVariables\\GearScoreLite.lua")
+			print("  on /reload or logout. Reproduce the problem, then /reload and send that file.")
+		end
 	elseif ( Verb == "rescan" ) then
 		local Who, Token = ResolveByName(strtrim(RawArgs))
 		if ( Token ) then
@@ -1328,10 +1171,6 @@ function GS_MANSET(Command)
 		else
 			print("GearScore -- /gs rescan <name>, or target somebody first.")
 		end
-	elseif ( Command == "dump" ) then ShowDump()
-	elseif ( Command == "queue" ) then
-		print(format("GearScore -- scanning: %s   queued: %d", tostring(GSL.scanName), #GSL.queue))
-		for i = 1, #GSL.queue do print("  " .. i .. ". " .. tostring(GSL.queue[i])); end
 	elseif ( Command == "sheet" ) then Toggle("PaperDoll", "Character Sheet Number"); UpdatePaperDoll()
 	elseif ( Command == "lock" ) or ( Command == "unlock" ) then
 		GS_Settings.Locked = ( Command == "lock" )
@@ -1391,6 +1230,10 @@ EventFrame:SetScript("OnEvent", function(self, event, arg1)
 		if ( GSL.scanName ) then DoRescan(); end
 
 	elseif ( event == "UNIT_INVENTORY_CHANGED" ) then
+		if ( arg1 ~= "player" ) then
+			Trace("UNIT_INVENTORY_CHANGED %s (%s)%s", tostring(arg1), tostring(arg1 and UnitName(arg1)),
+			      ( arg1 and GSL.scanName and UnitName(arg1) == GSL.scanName ) and ", under the scanner" or "")
+		end
 		if ( arg1 ) and ( arg1 ~= "player" ) and ( UnitName(arg1) )
 		   and ( UnitName(arg1) == GSL.inspectTarget ) then
 			GSL.answeredFor = UnitName(arg1)
@@ -1415,6 +1258,7 @@ EventFrame:SetScript("OnEvent", function(self, event, arg1)
 		end
 
 	elseif ( event == "PLAYER_TARGET_CHANGED" ) then
+		Trace("target -> %s", tostring(UnitName("target")))
 		if not ( GS_Settings ) or not ( GS_Settings.Player ) then return; end
 		if ( GS_Settings.HideInCombat ) and ( GSL.inCombat ) then return; end
 		if ( UnitExists("target") ) and ( UnitIsPlayer("target") ) then Track(UnitName("target"), "target"); end
@@ -1426,23 +1270,42 @@ EventFrame:SetScript("OnEvent", function(self, event, arg1)
 		for Key, Value in pairs(GS_DefaultSettings) do
 			if ( GS_Settings[Key] == nil ) then GS_Settings[Key] = Value; end
 		end
-		GS_Settings.Debug = false
 		PruneStore()
 		GSL.inCombat = UnitAffectingCombat("player") and true or false
 		ApplyAnchor()
 		UpdatePaperDoll()
+		if ( GS_Settings.Debug ) then
+			DebugSession("loaded", false)
+			print("GearScore -- debug logging is on (/gs debug to stop).")
+		end
 		self:UnregisterEvent("ADDON_LOADED")
+
+	elseif ( event == "PLAYER_LOGOUT" ) then
+		if ( Debugging() ) then DebugSnapshot("logout or reload"); end
 	end
 end)
+
+local function InspectCaller()
+	if not ( debugstack ) then return "?"; end
+	local Stack = debugstack(3, 12, 0) or ""
+	for AddOn in Stack:gmatch("AddOns[\\/]([^\\/]+)[\\/]") do
+		if ( AddOn ~= "GearScoreLite" ) then return AddOn; end
+	end
+	return "unknown"
+end
 
 if ( hooksecurefunc ) then
 	hooksecurefunc("NotifyInspect", function(Unit)
 		local Who = ( Unit ) and UnitName(Unit) or nil
 		if ( Who ) then GSL.inspectTarget = Who; end
+		if ( Debugging() ) then
+			Log("NotifyInspect(%s) for %s by another addon: %s", tostring(Unit), tostring(Who), InspectCaller())
+		end
 	end)
 end
 
 EventFrame:RegisterEvent("ADDON_LOADED")
+EventFrame:RegisterEvent("PLAYER_LOGOUT")
 EventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 EventFrame:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
 EventFrame:RegisterEvent("UNIT_INVENTORY_CHANGED")

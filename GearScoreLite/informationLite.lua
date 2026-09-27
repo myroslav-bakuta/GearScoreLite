@@ -46,7 +46,7 @@ GS_DefaultSettings = {
 	["MustTarget"] = false,   -- only score the unit you have targeted
 	["HideInCombat"] = false, -- suppress all tooltip output while in combat
 	["Status"] = true,        -- say why a score is missing instead of showing nothing
-	["Debug"] = false,        -- log every scan step to chat; never saved as on
+	["Debug"] = false,        -- record scans and events to GS_DebugLog (SavedVariables)
 	["PaperDoll"] = true,     -- number on the character sheet
 	["Locked"] = true,        -- while locked the number ignores the mouse entirely
 	["AnchorX"] = 72,         -- character sheet number, offset from PaperDollFrame TOPLEFT
@@ -155,10 +155,7 @@ GS_CommandList = {
 	"/gs range MIN MAX -> Score range the gradient spans (default 3000 6500).",
 	"/gs reset   -> Resets GearScore's options back to default.",
 	"--- Diagnostics ---",
-	"/gs debug   -> Toggles live scan logging in chat.",
-	"/gs why [name] -> Explains why a player has no score (defaults to your target).",
-	"/gs gear [name] -> Lists the item the last scan read in each slot, with its score (needs /gs debug).",
 	"/gs rescan [name] -> Drops the cached score and reads the player again.",
-	"/gs dump    -> Opens a copyable window with the recent scan log.",
-	"/gs queue   -> Shows the pending inspect queue.",
+	"/gs debug   -> Toggles the diagnostic log, saved to SavedVariables on /reload or logout.",
+	"/gs debug clear -> Empties the saved diagnostic log.",
 }
