@@ -727,7 +727,38 @@ local function StableUnit(Name, Unit)
 	return Unit
 end
 
+local SESSION_MAX_AGE = 3600
+local PRUNE_EVERY = 300
+
+local function Busy(Name)
+	return ( Name == GSL.scanName ) or ( GSL.queued[Name] ~= nil )
+end
+
+local function PruneSession()
+	local Now = GetTime()
+	if ( Now - GSL.lastPrune ) < PRUNE_EVERY then return; end
+	GSL.lastPrune = Now
+
+	local Me, Dropped = UnitName("player"), 0
+	for Name, Entry in pairs(GSL.cache) do
+		if ( Name ~= Me ) and not ( Busy(Name) ) and ( ( Now - ( Entry.time or 0 ) ) > SESSION_MAX_AGE ) then
+			GSL.cache[Name] = nil
+			Dropped = Dropped + 1
+		end
+	end
+	for _, Map in ipairs({ GSL.blocked, GSL.unsure }) do
+		for Name in pairs(Map) do
+			if not ( GSL.cache[Name] ) and not ( Busy(Name) ) then Map[Name] = nil; end
+		end
+	end
+	for Name, Parked in pairs(GSL.parked) do
+		if ( ( Now - Parked.time ) >= PARK_TTL ) then GSL.parked[Name] = nil; end
+	end
+	if ( Dropped > 0 ) then Log("session cache: dropped %d readings older than an hour", Dropped); end
+end
+
 local function Track(Name, Unit, Force)
+	PruneSession()
 	if not ( Unit ) or not ( UnitExists(Unit) ) or not ( UnitIsPlayer(Unit) ) then return; end
 	Name = Name or UnitName(Unit)
 	if not ( Name ) then return; end
