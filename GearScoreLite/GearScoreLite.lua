@@ -326,11 +326,42 @@ function GearScore_GetScore(Name, Target)
 	return floor(GearScore), Average, Complete, Suspect, ItemCount, Occupied, Breakdown
 end
 
+-- Case folding for player names, done byte by byte on UTF-8. strlower is not
+-- used: it goes through the C locale's tolower, which folds only ASCII at best
+-- and corrupts UTF-8 lead bytes under a non-C locale. Folded here: A-Z, the
+-- Cyrillic capitals U+0400-U+042F (lead byte 0xD0) and U+0490 Ґ, and the
+-- Latin-1 capitals U+00C0-U+00DE except the multiplication sign.
+local function FoldAscii(Char)
+	return string.char(Char:byte() + 32)
+end
+
+local function FoldCyrillic(Byte)
+	local B = Byte:byte()
+	if ( B <= 0x8F ) then return "\209" .. string.char(B + 0x10); end
+	if ( B <= 0x9F ) then return "\208" .. string.char(B + 0x20); end
+	if ( B <= 0xAF ) then return "\209" .. string.char(B - 0x20); end
+	return nil
+end
+
+local function FoldLatin(Byte)
+	local B = Byte:byte()
+	if ( B >= 0x80 ) and ( B <= 0x9E ) and ( B ~= 0x97 ) then return "\195" .. string.char(B + 0x20); end
+	return nil
+end
+
+local function FoldCase(Text)
+	Text = Text:gsub("[A-Z]", FoldAscii)
+	Text = Text:gsub("\208([\128-\175])", FoldCyrillic)
+	Text = Text:gsub("\210\144", "\210\145")
+	Text = Text:gsub("\195([\128-\158])", FoldLatin)
+	return Text
+end
+
 local function MatchName(Unit, Name, Loose)
 	if not ( UnitExists(Unit) ) then return nil; end
 	local Actual = UnitName(Unit)
 	if not ( Actual ) then return nil; end
-	if ( Actual == Name ) or ( ( Loose ) and ( strlower(Actual) == strlower(Name) ) ) then return Actual; end
+	if ( Actual == Name ) or ( ( Loose ) and ( FoldCase(Actual) == FoldCase(Name) ) ) then return Actual; end
 	return nil
 end
 
