@@ -45,6 +45,8 @@ local GSL = {
 	log = {},
 	logTime = {},
 	logNext = 1,
+	parked = {},
+	lastPrune = 0,
 }
 
 local LOG_MAX = 120
@@ -588,6 +590,15 @@ local function CancelRescan()
 	GSL.scanGrew = false
 end
 
+local PARK_TTL = 120
+
+local function Park(Name)
+	GSL.parked[Name] = { confirm = GSL.scanConfirm, settle = GSL.scanSettle, occupied = GSL.scanOccupied,
+	                     grew = GSL.scanGrew, read = GSL.scanRead, time = GetTime() }
+	local Entry = GSL.cache[Name]
+	if ( Entry ) then Entry.interrupted = true; end
+end
+
 local function BeginScan(Name, Unit)
 	GSL.scanName = Name
 	GSL.scanUnit = Unit
@@ -598,6 +609,17 @@ local function BeginScan(Name, Unit)
 	GSL.scanSettle = SCAN_SETTLE
 	GSL.scanOccupied = 0
 	GSL.scanGrew = false
+
+	local Parked = GSL.parked[Name]
+	GSL.parked[Name] = nil
+	if ( Parked ) and ( ( GetTime() - Parked.time ) < PARK_TTL ) then
+		GSL.scanConfirm = Parked.confirm
+		GSL.scanSettle = Parked.settle
+		GSL.scanOccupied = Parked.occupied
+		GSL.scanGrew = Parked.grew
+		GSL.scanRead = Parked.read
+		Log("scan %s resumed after a pause (%d slots seen before)", tostring(Name), Parked.occupied or 0)
+	end
 	RescanFrame:Show()
 end
 
@@ -623,7 +645,8 @@ local function DoRescan()
 	if not ( MatchName(Unit, Name) ) then
 		local Moved = FindUnit(Name)
 		if not ( Moved ) then
-			Log("scan %s abandoned: unit changed", tostring(Name))
+			Log("scan %s paused: no unit token points at them, resumes on the next hover", tostring(Name))
+			Park(Name)
 			CancelRescan(); NextInQueue(); return
 		end
 		Log("scan %s: %s no longer points at them, following %s", tostring(Name), tostring(Unit), Moved)
@@ -632,7 +655,14 @@ local function DoRescan()
 	end
 	GSL.scanTries = GSL.scanTries - 1
 	if ( ScanUnit(Name, Unit) ) then
+		local Entry = GSL.cache[Name]
+		if ( Entry ) then
+			Entry.interrupted = nil
+			Log("scan %s done: score=%d ilvl=%d%s", tostring(Name), Entry.score, Entry.ilvl,
+			    Entry.suspect and " (suspect)" or "")
+		end
 		CancelRescan()
+		RefreshTooltip(Name)
 		NextInQueue()
 	elseif ( GSL.scanTries <= 0 ) then
 		Log("scan %s gave up: %d slots read, budget exhausted", tostring(Name), GSL.scanRead or 0)
@@ -643,6 +673,7 @@ local function DoRescan()
 			GSL.cache[Name] = nil
 		elseif ( Entry ) then
 			Entry.settled = true
+			Entry.interrupted = nil
 		end
 		CancelRescan()
 		NextInQueue()
@@ -674,6 +705,7 @@ local UNSURE_RETRIES = 3
 local function IsFresh(Name)
 	local Entry = GSL.cache[Name]
 	if not ( Entry ) or ( Entry.score <= 0 ) then return false; end
+	if ( Entry.interrupted ) then return false; end
 	if not ( Entry.complete ) and not ( Entry.settled ) then return false; end
 	if not ( Entry.complete ) then
 		return ( GetTime() - Entry.time ) < CACHE_TTL_UNSURE
@@ -811,7 +843,7 @@ function GearScore_HookSetUnit()
 	local Score = tostring(Entry.score)
 	if ( Entry.remembered ) then
 		Score = Score .. " (memory)"
-	elseif not ( Entry.complete ) then
+	elseif not ( Entry.complete ) or ( Entry.interrupted ) or ( GSL.scanName == Name ) then
 		Score = Score .. " (scanning)"
 	elseif ( Entry.time ) and ( ( GetTime() - Entry.time ) < FRESH_LABEL ) then
 		Score = Score .. " (scanned)"
@@ -1259,6 +1291,7 @@ function GS_MANSET(Command)
 		local Who, Token = ResolveByName(strtrim(RawArgs))
 		if ( Token ) then
 			GSL.cache[Who] = nil
+			GSL.parked[Who] = nil
 			Track(Who, Token, true)
 			print("GearScore -- re-reading " .. tostring(Who) .. ", check again in a moment.")
 		else
@@ -1344,6 +1377,7 @@ EventFrame:SetScript("OnEvent", function(self, event, arg1)
 				GSL.cache[Who] = nil
 				GSL.unsure[Who] = nil
 				GSL.blocked[Who] = nil
+				GSL.parked[Who] = nil
 				if ( type(GS_Cache) == "table" ) then GS_Cache[Who] = nil; end
 				if ( Had ) then Log("cache invalidated for %s (inventory changed)", tostring(Who)); end
 			end
@@ -1418,6 +1452,15 @@ GearScoreLite = {
 		if not ( name ) then return; end
 		GSL.cache[name] = nil
 		GSL.unsure[name] = nil
+		GSL.parked[name] = nil
+	end,
+
+	GetState = function(name)
+		if not ( name ) then return nil; end
+		if ( GSL.scanName == name ) then return "scanning"; end
+		if ( GSL.queued[name] ) then return "queued"; end
+		if ( GSL.parked[name] ) then return "paused"; end
+		return nil
 	end,
 
 	GetPlayer = function() return GSL.player.score, GSL.player.ilvl end,
