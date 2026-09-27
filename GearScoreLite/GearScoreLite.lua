@@ -241,7 +241,7 @@ function GearScore_GetScore(Name, Target)
 		if ( select(9, GetItemInfo(OffLink)) == "INVTYPE_2HWEAPON" ) then TitanGrip = 0.5; end
 	end
 
-	local Breakdown = {}
+	local Breakdown = ( GS_Settings and GS_Settings.Debug ) and {} or nil
 
 	local Occupied = 0
 	for i = 1, 18 do
@@ -263,8 +263,10 @@ function GearScore_GetScore(Name, Target)
 					GearScore = GearScore + TempScore
 					ItemCount = ItemCount + 1
 					LevelTotal = LevelTotal + ( ItemLevel or 0 )
-					Breakdown[#Breakdown + 1] = { slot = i, link = ItemLink,
-					                              ilvl = ItemLevel or 0, score = floor(TempScore) }
+					if ( Breakdown ) then
+						Breakdown[#Breakdown + 1] = { slot = i, link = ItemLink,
+						                              ilvl = ItemLevel or 0, score = floor(TempScore) }
+					end
 					if ( CanBeMogged ) and ( ItemLevel ) and ( ItemLevel > 0 )
 					   and ( i ~= 16 ) and ( i ~= 17 ) and ( i ~= 18 ) then
 						Levels[#Levels + 1] = ItemLevel
