@@ -5,9 +5,10 @@ Uses a real lexer rather than regexes: quoted strings, long-bracket strings
 ([[...]], [==[...]==]) and long comments all have to be tracked so that a
 "--" inside a string is never mistaken for a comment.
 
-Trailing whitespace is trimmed and blank lines dropped, but line structure is
-otherwise preserved -- WoW reports Lua errors by line number, so keeping the
-file line-oriented (rather than collapsing it) keeps stack traces readable.
+Trailing whitespace is trimmed and blank lines dropped, so line NUMBERS shift:
+a line number in an error report from the shipped archive does not match the
+source. The file stays line-oriented (rather than collapsed), so the reported
+line is still readable in the minified file from the same release zip.
 """
 
 import sys
