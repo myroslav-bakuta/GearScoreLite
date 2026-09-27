@@ -1091,18 +1091,24 @@ local function MogOutliers(Unit)
 	return Median, Low
 end
 
+local function KnownName(Query)
+	local Saved = ( type(GS_Cache) == "table" ) and GS_Cache or {}
+	if ( GSL.cache[Query] ) or ( Saved[Query] ) then return Query; end
+	local Lower = strlower(Query)
+	for Name in pairs(GSL.cache) do
+		if ( strlower(Name) == Lower ) then return Name; end
+	end
+	for Name in pairs(Saved) do
+		if ( type(Name) == "string" ) and ( strlower(Name) == Lower ) then return Name; end
+	end
+	return Query
+end
+
 local function ResolveByName(Query)
 	if ( Query ) and ( Query ~= "" ) then
-		for i = 1, 40 do
-			local Candidate = "raid" .. i
-			if ( UnitExists(Candidate) ) and ( UnitName(Candidate) == Query ) then return Query, Candidate; end
-		end
-		for i = 1, 4 do
-			local Candidate = "party" .. i
-			if ( UnitExists(Candidate) ) and ( UnitName(Candidate) == Query ) then return Query, Candidate; end
-		end
-		if ( UnitExists("target") ) and ( UnitName("target") == Query ) then return Query, "target"; end
-		return Query, nil
+		local Unit, Actual = FindUnit(Query, true)
+		if ( Unit ) then return Actual, Unit; end
+		return KnownName(Query), nil
 	end
 	if ( UnitExists("target") ) then return UnitName("target"), "target"; end
 	if ( UnitExists("mouseover") ) then return UnitName("mouseover"), "mouseover"; end
@@ -1147,27 +1153,7 @@ local function ShowGear(Query)
 end
 
 local function Explain(Query)
-	local Name, Unit
-
-	if ( Query ) and ( Query ~= "" ) then
-		Name = Query
-		for i = 1, 40 do
-			local Candidate = "raid" .. i
-			if ( UnitExists(Candidate) ) and ( UnitName(Candidate) == Name ) then Unit = Candidate; break; end
-		end
-		if not ( Unit ) then
-			for i = 1, 4 do
-				local Candidate = "party" .. i
-				if ( UnitExists(Candidate) ) and ( UnitName(Candidate) == Name ) then Unit = Candidate; break; end
-			end
-		end
-		if not ( Unit ) and ( UnitExists("target") ) and ( UnitName("target") == Name ) then Unit = "target"; end
-	elseif ( UnitExists("target") ) then
-		Unit, Name = "target", UnitName("target")
-	elseif ( UnitExists("mouseover") ) then
-		Unit, Name = "mouseover", UnitName("mouseover")
-	end
-
+	local Name, Unit = ResolveByName(Query)
 	if not ( Name ) then
 		print("GearScore -- /gs why <name>, or target somebody first.")
 		return
@@ -1183,7 +1169,7 @@ local function Explain(Query)
 			print("  inspectable: yes")
 		end
 	else
-		print("  no unit token in range (not in your raid, party or target)")
+		print("  no unit token in range (not in your raid, party, target, focus or mouseover)")
 	end
 
 	local Entry = GSL.cache[Name]
