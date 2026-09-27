@@ -1182,7 +1182,7 @@ local function Explain(Query)
 		end
 		if ( Entry.suspect ) then
 			print("  transmog: slots far below this character's median iLevel, so the")
-			print("            real gear is better than this score. /gs mog shows it in the tooltip.")
+			print("            real gear is better than this score. /gs gear lists the slots.")
 		end
 	else
 		print("  cached: nothing yet")
