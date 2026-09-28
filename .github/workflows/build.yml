@@ -32,8 +32,10 @@ concurrency:
   group: build-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+# Read-only by default; only the build job, which may publish a release, gets
+# write access.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   # Fast feedback on every push: does the addon still lint?
@@ -74,6 +76,8 @@ jobs:
   build:
     needs: lint
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -90,26 +94,32 @@ jobs:
 
       - name: Resolve version
         id: version
+        env:
+          # Through the environment, not ${{ }} in the script: a dispatch input
+          # pasted into the shell source would run as code.
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_RELEASE: ${{ inputs.release }}
         run: |
-          toc_version="$(sed -n 's/^## Version:[[:space:]]*//p' GearScoreLite/GearScoreLite.toc | head -1)"
+          toc_version="$(sed -n 's/^## Version:[[:space:]]*//p' GearScoreLite/GearScoreLite.toc | head -1 | tr -d '\r')"
           if [ -z "$toc_version" ]; then
             echo "::error::no '## Version:' found in GearScoreLite/GearScoreLite.toc"
             exit 1
           fi
 
-          case "$toc_version" in
-            [0-9]*.[0-9]*.[0-9]*) ;;
-            *)
-              echo "::error::unexpected version format in .toc: '$toc_version' (expected e.g. 4.0.5)"
-              exit 1
-              ;;
-          esac
+          if ! printf '%s' "$toc_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::unexpected version format in .toc: '$toc_version' (expected e.g. 4.0.5)"
+            exit 1
+          fi
 
-          version="${{ inputs.version }}"
-          version="${version:-v$toc_version}"
+          version="${INPUT_VERSION:-v$toc_version}"
           case "$version" in v*) ;; *) version="v$version" ;; esac
 
-          if [ "${{ inputs.release }}" = "yes" ] && [ -n "${{ inputs.version }}" ] && [ "$version" != "v$toc_version" ]; then
+          if ! printf '%s' "$version" | grep -Eq '^v[0-9A-Za-z._-]+$'; then
+            echo "::error::unexpected version input: '$version'"
+            exit 1
+          fi
+
+          if [ "$INPUT_RELEASE" = "yes" ] && [ -n "$INPUT_VERSION" ] && [ "$version" != "v$toc_version" ]; then
             echo "::error::requested $version but the .toc says v$toc_version -- bump the .toc first"
             exit 1
           fi
@@ -190,7 +200,11 @@ jobs:
             echo "No previous tag found; generating notes from the start."
           fi
 
+          # --target pins the new tag to the commit that was built. Without it
+          # gh tags the default branch head, which differs when the run was
+          # dispatched from another branch or main moved during the build.
           gh release create "$version" \
+            --target "$GITHUB_SHA" \
             --title "GearScoreLite: Reborn $version" \
             "${notes_args[@]}" \
             "${{ steps.package.outputs.name }}.zip"

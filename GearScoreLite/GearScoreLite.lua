@@ -43,33 +43,58 @@ local GSL = {
 	blocked = {},
 	unsure = {},
 	log = {},
+	logTime = {},
 	logNext = 1,
+	parked = {},
+	yields = {},
+	lastPrune = 0,
 }
 
 local LOG_MAX = 120
+local DEBUG_MAX = 5000
+local DEBUG_TRIM = 500
 
-local function Stamp()
-	return date("%H:%M:%S")
+local function Debugging()
+	return ( GS_Settings ) and ( GS_Settings.Debug ) and true or false
+end
+
+local function DebugWrite(Text)
+	if ( type(GS_DebugLog) ~= "table" ) or ( type(GS_DebugLog.lines) ~= "table" ) then
+		GS_DebugLog = { lines = {} }
+	end
+	local Lines = GS_DebugLog.lines
+	Lines[#Lines + 1] = Text
+	if ( #Lines > DEBUG_MAX + DEBUG_TRIM ) then
+		local Kept = {}
+		for i = #Lines - DEBUG_MAX + 1, #Lines do Kept[#Kept + 1] = Lines[i]; end
+		GS_DebugLog.lines = Kept
+	end
 end
 
 local function Log(Format, ...)
 	local Ok, Text = pcall(format, Format, ...)
 	if not ( Ok ) then Text = tostring(Format); end
-	Text = Stamp() .. "  " .. Text
 
+	local Now = time()
 	GSL.log[GSL.logNext] = Text
+	GSL.logTime[GSL.logNext] = Now
 	GSL.logNext = ( GSL.logNext % LOG_MAX ) + 1
 
-	if ( GS_Settings ) and ( GS_Settings.Debug ) then
-		print("|cff66ccffGS|r " .. Text)
+	if ( Debugging() ) then
+		DebugWrite(format("%s %9.2f  %s", date("%Y-%m-%d %H:%M:%S", Now), GetTime(), Text))
 	end
+end
+
+local function Trace(...)
+	if ( Debugging() ) then Log(...); end
 end
 
 local function LogLines()
 	local Lines = {}
 	for i = 0, LOG_MAX - 1 do
-		local Entry = GSL.log[( ( GSL.logNext - 1 + i ) % LOG_MAX ) + 1]
-		if ( Entry ) then Lines[#Lines + 1] = Entry; end
+		local Index = ( ( GSL.logNext - 1 + i ) % LOG_MAX ) + 1
+		local Entry = GSL.log[Index]
+		if ( Entry ) then Lines[#Lines + 1] = date("%H:%M:%S", GSL.logTime[Index]) .. "  " .. Entry; end
 	end
 	return Lines
 end
@@ -90,12 +115,13 @@ local function ToSRGB(C)
 	return 1.055 * (C ^ (1 / 2.4)) - 0.055
 end
 
-local GradientCache, GradientCacheKey = nil, nil
+local GradientCache, GradientCacheStops, GradientCacheCount = nil, nil, nil
 
 local function BuildGradient()
 	local Stops = ( GS_Gradient and GS_Gradient.Stops ) or {}
-	local Key = table.concat(Stops, ",")
-	if ( GradientCache ) and ( GradientCacheKey == Key ) then return GradientCache; end
+	if ( GradientCache ) and ( GradientCacheStops == Stops ) and ( GradientCacheCount == #Stops ) then
+		return GradientCache
+	end
 
 	local Built = {}
 	for i = 1, #Stops do
@@ -104,7 +130,7 @@ local function BuildGradient()
 	end
 	if ( #Built < 2 ) then return nil; end
 
-	GradientCache, GradientCacheKey = Built, Key
+	GradientCache, GradientCacheStops, GradientCacheCount = Built, Stops, #Stops
 	return Built
 end
 
@@ -223,6 +249,14 @@ local function ItemReady(Cache, ItemLink)
 	return Known[1], Known[2]
 end
 
+-- The visible-item fields the client fills for anybody in view carry the
+-- permanent enchant but never gems; only a real inspect reply does. A link with
+-- a gem therefore proves the slot came from the inspect, not the transmog.
+local function HasGems(ItemLink)
+	local G1, G2, G3, G4 = ItemLink:match("item:%-?%d+:%-?%d+:(%-?%d+):(%-?%d+):(%-?%d+):(%-?%d+)")
+	return ( G1 ~= nil ) and ( ( G1 ~= "0" ) or ( G2 ~= "0" ) or ( G3 ~= "0" ) or ( G4 ~= "0" ) )
+end
+
 function GearScore_GetScore(Name, Target)
 	if ( Target == nil ) then Target = Name; end
 	if not ( Target ) or not ( UnitIsPlayer(Target) ) then return nil; end
@@ -241,14 +275,15 @@ function GearScore_GetScore(Name, Target)
 		if ( select(9, GetItemInfo(OffLink)) == "INVTYPE_2HWEAPON" ) then TitanGrip = 0.5; end
 	end
 
-	local Breakdown = {}
+	local Breakdown = ( GS_Settings and GS_Settings.Debug ) and {} or nil
 
-	local Occupied = 0
+	local Occupied, Gemmed = 0, 0
 	for i = 1, 18 do
 		if ( i ~= 4 ) then
 			local ItemLink = GetInventoryItemLink(Target, i)
 			if ( ItemLink ) then
 				Occupied = Occupied + 1
+				if ( HasGems(ItemLink) ) then Gemmed = Gemmed + 1; end
 				local ReadyRarity, ReadyLevel = ItemReady(Ready, ItemLink)
 				if ( ReadyRarity ) and ( ReadyLevel ) then
 					local TempScore, ItemLevel = GearScore_GetItemScore(ItemLink)
@@ -263,8 +298,10 @@ function GearScore_GetScore(Name, Target)
 					GearScore = GearScore + TempScore
 					ItemCount = ItemCount + 1
 					LevelTotal = LevelTotal + ( ItemLevel or 0 )
-					Breakdown[#Breakdown + 1] = { slot = i, link = ItemLink,
-					                              ilvl = ItemLevel or 0, score = floor(TempScore) }
+					if ( Breakdown ) then
+						Breakdown[#Breakdown + 1] = { slot = i, link = ItemLink,
+						                              ilvl = ItemLevel or 0, score = floor(TempScore) }
+					end
 					if ( CanBeMogged ) and ( ItemLevel ) and ( ItemLevel > 0 )
 					   and ( i ~= 16 ) and ( i ~= 17 ) and ( i ~= 18 ) then
 						Levels[#Levels + 1] = ItemLevel
@@ -296,7 +333,73 @@ function GearScore_GetScore(Name, Target)
 		end
 	end
 
-	return floor(GearScore), Average, Complete, Suspect, ItemCount, Occupied, Breakdown
+	return floor(GearScore), Average, Complete, Suspect, ItemCount, Occupied, Breakdown, Gemmed
+end
+
+-- Case folding for player names, done byte by byte on UTF-8. strlower is not
+-- used: it goes through the C locale's tolower, which folds only ASCII at best
+-- and corrupts UTF-8 lead bytes under a non-C locale. Folded here: A-Z, the
+-- Cyrillic capitals U+0400-U+042F (lead byte 0xD0) and U+0490 Ґ, and the
+-- Latin-1 capitals U+00C0-U+00DE except the multiplication sign.
+local function FoldAscii(Char)
+	return string.char(Char:byte() + 32)
+end
+
+local function FoldCyrillic(Byte)
+	local B = Byte:byte()
+	if ( B <= 0x8F ) then return "\209" .. string.char(B + 0x10); end
+	if ( B <= 0x9F ) then return "\208" .. string.char(B + 0x20); end
+	if ( B <= 0xAF ) then return "\209" .. string.char(B - 0x20); end
+	return nil
+end
+
+local function FoldLatin(Byte)
+	local B = Byte:byte()
+	if ( B >= 0x80 ) and ( B <= 0x9E ) and ( B ~= 0x97 ) then return "\195" .. string.char(B + 0x20); end
+	return nil
+end
+
+local function FoldCase(Text)
+	Text = Text:gsub("[A-Z]", FoldAscii)
+	Text = Text:gsub("\208([\128-\175])", FoldCyrillic)
+	Text = Text:gsub("\210\144", "\210\145")
+	Text = Text:gsub("\195([\128-\158])", FoldLatin)
+	return Text
+end
+
+local function MatchName(Unit, Name, Loose)
+	if not ( UnitExists(Unit) ) then return nil; end
+	local Actual = UnitName(Unit)
+	if not ( Actual ) then return nil; end
+	if ( Actual == Name ) or ( ( Loose ) and ( FoldCase(Actual) == FoldCase(Name) ) ) then return Actual; end
+	return nil
+end
+
+local function GroupUnit(Name, Loose)
+	local Raid = GetNumRaidMembers and GetNumRaidMembers() or 40
+	for i = 1, Raid do
+		local Actual = MatchName("raid" .. i, Name, Loose)
+		if ( Actual ) then return "raid" .. i, Actual; end
+	end
+	local Party = GetNumPartyMembers and GetNumPartyMembers() or 4
+	for i = 1, Party do
+		local Actual = MatchName("party" .. i, Name, Loose)
+		if ( Actual ) then return "party" .. i, Actual; end
+	end
+	return nil, nil
+end
+
+local LooseUnits = { "target", "focus", "mouseover" }
+
+local function FindUnit(Name, Loose)
+	if not ( Name ) or ( Name == "" ) then return nil, nil; end
+	local Unit, Actual = GroupUnit(Name, Loose)
+	if ( Unit ) then return Unit, Actual; end
+	for i = 1, #LooseUnits do
+		Actual = MatchName(LooseUnits[i], Name, Loose)
+		if ( Actual ) then return LooseUnits[i], Actual; end
+	end
+	return nil, nil
 end
 
 local RescanFrame = CreateFrame("Frame", nil, UIParent)
@@ -307,6 +410,7 @@ local SCAN_DEADLINE = 30
 local SCAN_CONFIRM = 6
 local SCAN_SETTLE = 6
 local SCAN_CONFIRM_BUSY = 2
+local SCAN_SETTLE_REAL = 1
 
 local function InspectInUse()
 	if ( InspectFrame ) and ( InspectFrame:IsShown() ) then return true; end
@@ -369,7 +473,9 @@ local function Remember(Name, Entry)
 	if ( type(GS_Cache) ~= "table" ) or not ( Name ) or not ( Entry ) then return; end
 	if not ( Entry.complete ) or ( Entry.suspect ) or ( Entry.unanswered )
 	   or ( Entry.score <= 0 ) then return; end
-	GS_Cache[Name] = { score = Entry.score, ilvl = Entry.ilvl, time = time() }
+	local Saved = GS_Cache[Name]
+	if not ( Entry.real ) and ( type(Saved) == "table" ) and ( Saved.real ) then return; end
+	GS_Cache[Name] = { score = Entry.score, ilvl = Entry.ilvl, time = time(), real = Entry.real or nil }
 end
 
 local function PruneStore()
@@ -409,6 +515,16 @@ local function DisplayEntry(Name)
 	         remembered = Saved.time, time = GetTime() }
 end
 
+local function ItemsText(Breakdown)
+	local Parts = {}
+	for i = 1, #Breakdown do
+		local Slot = Breakdown[i]
+		local Item = tostring(Slot.link):match("|H(item:[%-%d:]+)|h") or tostring(Slot.link)
+		Parts[#Parts + 1] = format("%d=%s@%d/%d", Slot.slot, Item, Slot.ilvl, Slot.score)
+	end
+	return table.concat(Parts, " ")
+end
+
 local function ScanUnit(Name, Unit)
 	local Blocked = Obstacle(Unit)
 	if ( Blocked ) then
@@ -422,7 +538,7 @@ local function ScanUnit(Name, Unit)
 	end
 	GSL.blocked[Name] = nil
 
-	if ( CanInspect(Unit) ) and not ( InspectInUse() ) then
+	if not ( UnitIsUnit(Unit, "player") ) and ( CanInspect(Unit) ) and not ( InspectInUse() ) then
 		local Now = GetTime()
 		if ( GSL.lastInspectName ~= Name ) or ( ( Now - GSL.lastInspectTime ) > 1.5 ) then
 			GSL.lastInspectName = Name
@@ -433,18 +549,31 @@ local function ScanUnit(Name, Unit)
 		end
 	end
 
-	local Score, Average, Complete, Suspect, Read, Total, Breakdown = GearScore_GetScore(Name, Unit)
+	local Score, Average, Complete, Suspect, Read, Total, Breakdown, Gemmed = GearScore_GetScore(Name, Unit)
 	if not ( Score ) then return true; end
 
+	-- Gems only ever arrive with this player's own inspect data, so a gemmed
+	-- reading needs no reply attribution and is not a transmog guess.
+	local Real = ( ( Gemmed or 0 ) > 0 ) and not ( UnitIsUnit(Unit, "player") )
+	if ( Real ) then Suspect = false; end
+
 	local Unanswered = false
-	if ( Complete ) and not ( UnitIsUnit(Unit, "player") ) and ( GSL.answeredFor ~= Name ) then
+	if ( Complete ) and not ( Real ) and not ( UnitIsUnit(Unit, "player") ) and ( GSL.answeredFor ~= Name ) then
 		Complete = false
 		Unanswered = true
 		Suspect = true
 	end
 
-	Log("scan %s: score=%d ilvl=%d slots=%d/%d %s", tostring(Name), Score, Average,
-	    Read or 0, Total or 0, Complete and "complete" or "partial")
+	Log("scan %s: score=%d ilvl=%d slots=%d/%d %s, gems in %d", tostring(Name), Score, Average,
+	    Read or 0, Total or 0, Complete and "complete" or ( Unanswered and "unanswered" or "partial" ),
+	    Gemmed or 0)
+	if ( Breakdown ) then
+		local Items = ItemsText(Breakdown)
+		if ( GSL.lastItemsName ~= Name ) or ( GSL.lastItems ~= Items ) then
+			GSL.lastItemsName, GSL.lastItems = Name, Items
+			Log("scan %s items: %s", tostring(Name), Items)
+		end
+	end
 
 	if ( Name == GSL.scanName ) and ( Read ) and ( Read > ( GSL.scanRead or 0 ) ) then
 		GSL.scanRead = Read
@@ -458,6 +587,7 @@ local function ScanUnit(Name, Unit)
 	local Settle = Complete
 	if ( Complete ) and not ( Suspect ) and not ( UnitIsUnit(Unit, "player") ) then
 		local Left = GSL.scanSettle or SCAN_SETTLE
+		if ( Real ) and ( Left > SCAN_SETTLE_REAL ) then Left = SCAN_SETTLE_REAL; end
 		if ( Left > 0 ) then
 			GSL.scanSettle = Left - 1
 			Settle = false
@@ -466,7 +596,7 @@ local function ScanUnit(Name, Unit)
 
 	if ( Complete ) and ( Total ) and ( Total > ( GSL.scanOccupied or 0 ) )
 	   and not ( UnitIsUnit(Unit, "player") ) then
-		GSL.scanSettle = SCAN_SETTLE
+		GSL.scanSettle = Real and SCAN_SETTLE_REAL or SCAN_SETTLE
 		if ( GSL.scanOccupied or 0 ) > 0 then
 			Log("scan %s: slot count rose to %d, waiting for the rest",
 			    tostring(Name), Total)
@@ -497,8 +627,17 @@ local function ScanUnit(Name, Unit)
 		return false
 	end
 
+	if ( Previous ) and ( Previous.real ) and not ( Real ) then
+		Log("scan %s: ignored a reading without gems (%d), the one held has them (%d)",
+		    tostring(Name), Score, Previous.score)
+		return Settle
+	end
+
 	local Improves = ( Previous ) and ( Complete ) and not ( Suspect )
 	                 and ( not ( Previous.complete ) or ( Previous.suspect ) )
+	if ( Real ) and ( Previous ) and not ( Previous.real ) then
+		Improves = true
+	end
 	if ( Previous ) and ( Average ) and ( Previous.ilvl )
 	   and ( Average > Previous.ilvl + 20 ) then
 		Improves = true
@@ -515,11 +654,12 @@ local function ScanUnit(Name, Unit)
 
 	GSL.cache[Name] = { score = Score, ilvl = Average, complete = Complete, suspect = Suspect,
 	                    unanswered = Unanswered, partialSet = GSL.scanGrew or nil,
-	                    read = Read, occupied = Total, time = GetTime(),
-	                    breakdown = GS_Settings.Debug and Breakdown or nil }
+	                    read = Read, occupied = Total, time = GetTime(), real = Real or nil }
 	if ( Complete ) and not ( Suspect ) then
 		GSL.unsure[Name] = nil
-		Remember(Name, GSL.cache[Name])
+		-- A gemless reading may still be the transmog; it is remembered only
+		-- once its scan settles (see DoRescan), your own gear excepted.
+		if ( Real ) or ( UnitIsUnit(Unit, "player") ) then Remember(Name, GSL.cache[Name]); end
 	end
 	if not ( Previous ) or ( Previous.score ~= Score ) then
 		Announce(Name, Score, Average)
@@ -549,6 +689,22 @@ local function CancelRescan()
 	GSL.scanSettle = SCAN_SETTLE
 	GSL.scanOccupied = 0
 	GSL.scanGrew = false
+	GSL.scanBlockedTicks = 0
+end
+
+local PARK_TTL = 120
+
+-- Obstacles that clear up by themselves later (walking into range, coming
+-- online); a scan held up by one gives the slot to whoever is waiting.
+local Unreachable = { ["range"] = true, ["cannotinspect"] = true, ["offline"] = true }
+local BLOCKED_YIELD = 2
+local YIELD_MAX = 3
+
+local function Park(Name)
+	GSL.parked[Name] = { confirm = GSL.scanConfirm, settle = GSL.scanSettle, occupied = GSL.scanOccupied,
+	                     grew = GSL.scanGrew, read = GSL.scanRead, time = GetTime() }
+	local Entry = GSL.cache[Name]
+	if ( Entry ) then Entry.interrupted = true; end
 end
 
 local function BeginScan(Name, Unit)
@@ -561,37 +717,104 @@ local function BeginScan(Name, Unit)
 	GSL.scanSettle = SCAN_SETTLE
 	GSL.scanOccupied = 0
 	GSL.scanGrew = false
+	GSL.scanBlockedTicks = 0
+
+	local Parked = GSL.parked[Name]
+	GSL.parked[Name] = nil
+	if ( Parked ) and ( ( GetTime() - Parked.time ) < PARK_TTL ) then
+		GSL.scanConfirm = Parked.confirm
+		GSL.scanSettle = Parked.settle
+		GSL.scanOccupied = Parked.occupied
+		GSL.scanGrew = Parked.grew
+		GSL.scanRead = Parked.read
+		Log("scan %s resumed after a pause (%d slots seen before)", tostring(Name), Parked.occupied or 0)
+	end
 	RescanFrame:Show()
 end
 
 local function NextInQueue()
+	local Budget = #GSL.queue
 	while ( #GSL.queue > 0 ) do
 		local Name = table.remove(GSL.queue, 1)
 		local Unit = GSL.queued[Name]
 		GSL.queued[Name] = nil
-		if ( Unit ) and ( UnitExists(Unit) ) and ( UnitName(Unit) == Name ) then
+		Budget = Budget - 1
+		if not ( Unit ) or not ( MatchName(Unit, Name) ) then Unit = FindUnit(Name); end
+		if not ( Unit ) then
+			Log("queue: dropped stale entry %s", tostring(Name))
+		elseif ( Budget > 0 ) and ( Unreachable[Obstacle(Unit) or ""] ) then
+			-- Out of reach right now; somebody later in the line may not be.
+			GSL.queue[#GSL.queue + 1] = Name
+			GSL.queued[Name] = Unit
+			Log("queue: %s is out of reach, trying the next one", tostring(Name))
+		else
 			BeginScan(Name, Unit)
 			Log("queue -> scanning %s (%d still waiting)", tostring(Name), #GSL.queue)
 			return true
 		end
-		Log("queue: dropped stale entry %s", tostring(Name))
 	end
 	return false
+end
+
+local function Yield(Name, Unit, Reason)
+	local Count = ( GSL.yields[Name] or 0 ) + 1
+	Park(Name)
+	CancelRescan()
+	if ( Count <= YIELD_MAX ) then
+		GSL.yields[Name] = Count
+		GSL.queue[#GSL.queue + 1] = Name
+		GSL.queued[Name] = Unit
+		Log("scan %s yields the slot: %s, back of the queue (%d waiting)", tostring(Name),
+		    ObstacleText[Reason] or Reason, #GSL.queue)
+	else
+		GSL.yields[Name] = nil
+		Log("scan %s dropped: still %s after %d turns, resumes on the next hover", tostring(Name),
+		    ObstacleText[Reason] or Reason, YIELD_MAX)
+	end
+	NextInQueue()
 end
 
 local function DoRescan()
 	local Name, Unit = GSL.scanName, GSL.scanUnit
 	if not ( Name ) or not ( Unit ) then CancelRescan(); NextInQueue(); return; end
-	if not ( UnitExists(Unit) ) or ( UnitName(Unit) ~= Name ) then
-		Log("scan %s abandoned: unit changed", tostring(Name))
-		CancelRescan(); NextInQueue(); return
+	if not ( MatchName(Unit, Name) ) then
+		local Moved = FindUnit(Name)
+		if not ( Moved ) then
+			Log("scan %s paused: no unit token points at them, resumes on the next hover", tostring(Name))
+			Park(Name)
+			CancelRescan(); NextInQueue(); return
+		end
+		Log("scan %s: %s no longer points at them, following %s", tostring(Name), tostring(Unit), Moved)
+		Unit = Moved
+		GSL.scanUnit = Moved
 	end
 	GSL.scanTries = GSL.scanTries - 1
-	if ( ScanUnit(Name, Unit) ) then
+	local Finished = ScanUnit(Name, Unit)
+	local Reason = GSL.blocked[Name]
+	if not ( Finished ) and ( Unreachable[Reason or ""] ) then
+		GSL.scanBlockedTicks = ( GSL.scanBlockedTicks or 0 ) + 1
+		if ( GSL.scanBlockedTicks >= BLOCKED_YIELD ) and ( #GSL.queue > 0 ) then
+			Yield(Name, Unit, Reason)
+			return
+		end
+	else
+		GSL.scanBlockedTicks = 0
+	end
+	if ( Finished ) then
+		GSL.yields[Name] = nil
+		local Entry = GSL.cache[Name]
+		if ( Entry ) then
+			Entry.interrupted = nil
+			Log("scan %s done: score=%d ilvl=%d%s%s", tostring(Name), Entry.score, Entry.ilvl,
+			    Entry.real and ", gems seen" or ", no gems seen", Entry.suspect and " (suspect)" or "")
+			Remember(Name, Entry)
+		end
 		CancelRescan()
+		RefreshTooltip(Name)
 		NextInQueue()
 	elseif ( GSL.scanTries <= 0 ) then
 		Log("scan %s gave up: %d slots read, budget exhausted", tostring(Name), GSL.scanRead or 0)
+		GSL.yields[Name] = nil
 		local Entry = GSL.cache[Name]
 		if ( Entry ) and ( Entry.unanswered ) then
 			Log("scan %s: discarding an unanswered reading (%d) rather than settling it",
@@ -599,6 +822,8 @@ local function DoRescan()
 			GSL.cache[Name] = nil
 		elseif ( Entry ) then
 			Entry.settled = true
+			Entry.interrupted = nil
+			Remember(Name, Entry)
 		end
 		CancelRescan()
 		NextInQueue()
@@ -608,9 +833,15 @@ end
 local function UpdatePlayer()
 	local Score, Average, Complete = GearScore_GetScore("player")
 	if ( Score ) then
+		local Changed = ( Score ~= GSL.player.score ) or ( Average ~= GSL.player.ilvl )
+		local Name = UnitName("player")
 		GSL.player.score = Score
 		GSL.player.ilvl = Average
-		GSL.cache[UnitName("player")] = { score = Score, ilvl = Average, complete = Complete, suspect = false, time = GetTime() }
+		GSL.cache[Name] = { score = Score, ilvl = Average, complete = Complete, suspect = false, time = GetTime() }
+		if ( Changed ) and ( Name ) then
+			Trace("own score: %d, ilvl %d, %s", Score, Average, Complete and "complete" or "items still loading")
+			Announce(Name, Score, Average)
+		end
 	end
 	return Complete
 end
@@ -627,6 +858,7 @@ local UNSURE_RETRIES = 3
 local function IsFresh(Name)
 	local Entry = GSL.cache[Name]
 	if not ( Entry ) or ( Entry.score <= 0 ) then return false; end
+	if ( Entry.interrupted ) then return false; end
 	if not ( Entry.complete ) and not ( Entry.settled ) then return false; end
 	if not ( Entry.complete ) then
 		return ( GetTime() - Entry.time ) < CACHE_TTL_UNSURE
@@ -642,24 +874,49 @@ end
 local function StableUnit(Name, Unit)
 	if not ( Unit ) then return Unit; end
 	if ( Unit ~= "target" ) and ( Unit ~= "mouseover" ) and ( Unit ~= "focus" ) then return Unit; end
-	for i = 1, 40 do
-		local Candidate = "raid" .. i
-		if ( UnitExists(Candidate) ) and ( UnitName(Candidate) == Name ) then return Candidate; end
-	end
-	for i = 1, 4 do
-		local Candidate = "party" .. i
-		if ( UnitExists(Candidate) ) and ( UnitName(Candidate) == Name ) then return Candidate; end
-	end
+	local Group = GroupUnit(Name)
+	if ( Group ) then return Group; end
+	if ( Unit == "mouseover" ) and ( MatchName("target", Name) ) then return "target"; end
 	return Unit
 end
 
+local SESSION_MAX_AGE = 3600
+local PRUNE_EVERY = 300
+
+local function Busy(Name)
+	return ( Name == GSL.scanName ) or ( GSL.queued[Name] ~= nil )
+end
+
+local function PruneSession()
+	local Now = GetTime()
+	if ( Now - GSL.lastPrune ) < PRUNE_EVERY then return; end
+	GSL.lastPrune = Now
+
+	local Me, Dropped = UnitName("player"), 0
+	for Name, Entry in pairs(GSL.cache) do
+		if ( Name ~= Me ) and not ( Busy(Name) ) and ( ( Now - ( Entry.time or 0 ) ) > SESSION_MAX_AGE ) then
+			GSL.cache[Name] = nil
+			Dropped = Dropped + 1
+		end
+	end
+	for _, Map in ipairs({ GSL.blocked, GSL.unsure, GSL.yields }) do
+		for Name in pairs(Map) do
+			if not ( GSL.cache[Name] ) and not ( Busy(Name) ) then Map[Name] = nil; end
+		end
+	end
+	for Name, Parked in pairs(GSL.parked) do
+		if ( ( Now - Parked.time ) >= PARK_TTL ) then GSL.parked[Name] = nil; end
+	end
+	if ( Dropped > 0 ) then Log("session cache: dropped %d readings older than an hour", Dropped); end
+end
+
 local function Track(Name, Unit, Force)
+	PruneSession()
 	if not ( Unit ) or not ( UnitExists(Unit) ) or not ( UnitIsPlayer(Unit) ) then return; end
 	Name = Name or UnitName(Unit)
 	if not ( Name ) then return; end
-	Unit = StableUnit(Name, Unit)
-
 	if not ( Force ) and ( IsFresh(Name) ) then return; end
+	Unit = StableUnit(Name, Unit)
 
 	local Stale = GSL.cache[Name]
 	if ( Stale ) and ( Stale.suspect or Stale.settled ) then
@@ -678,7 +935,13 @@ local function Track(Name, Unit, Force)
 	if ( GSL.queued[Name] ) then GSL.queued[Name] = Unit; return; end
 
 	if not ( GSL.scanName ) then
-		if not ( ScanUnit(Name, Unit) ) then BeginScan(Name, Unit); end
+		if ( GSL.parked[Name] ) then
+			-- Restore the paused counters first, so this reading counts towards them.
+			BeginScan(Name, Unit)
+			DoRescan()
+		elseif not ( ScanUnit(Name, Unit) ) then
+			BeginScan(Name, Unit)
+		end
 		return
 	end
 
@@ -770,7 +1033,7 @@ function GearScore_HookSetUnit()
 	local Score = tostring(Entry.score)
 	if ( Entry.remembered ) then
 		Score = Score .. " (memory)"
-	elseif not ( Entry.complete ) then
+	elseif not ( Entry.complete ) or ( Entry.interrupted ) or ( GSL.scanName == Name ) then
 		Score = Score .. " (scanning)"
 	elseif ( Entry.time ) and ( ( GetTime() - Entry.time ) < FRESH_LABEL ) then
 		Score = Score .. " (scanned)"
@@ -785,7 +1048,8 @@ function GearScore_HookSetUnit()
 	if ( Entry.remembered ) then
 		local Age = time() - Entry.remembered
 		local Ago
-		if ( Age < 3600 ) then Ago = "moments ago"
+		if ( Age < 60 ) then Ago = "moments ago"
+		elseif ( Age < 3600 ) then Ago = floor(Age / 60) .. "m ago"
 		elseif ( Age < 86400 ) then Ago = floor(Age / 3600) .. "h ago"
 		else Ago = floor(Age / 86400) .. "d ago"
 		end
@@ -809,13 +1073,12 @@ function GearScore_HookItem(ItemName, ItemLink, Tooltip)
 
 	local ItemScore, ItemLevel, _, Red, Blue, Green, _, ItemEquipLoc = GearScore_GetItemScore(ItemLink)
 
-	if ( ItemScore < 0 ) then
+	if ( ItemScore < 0 ) or not ( GS_Settings.Item ) then
 		if ( GS_Settings.Level ) and ( ItemLevel ) and ( ItemLevel > 0 ) then
 			Tooltip:AddLine("iLevel " .. ItemLevel)
 		end
 		return
 	end
-	if not ( GS_Settings.Item ) then return; end
 
 	if ( GS_Settings.Level ) and ( ItemLevel ) then
 		Tooltip:AddDoubleLine("GearScore: " .. ItemScore, "(iLevel " .. ItemLevel .. ")", Red, Green, Blue, Red, Green, Blue)
@@ -875,6 +1138,7 @@ Anchor:SetScript("OnDragStart", function(self) self:StartMoving() end)
 
 Anchor:SetScript("OnDragStop", function(self)
 	self:StopMovingOrSizing()
+	if ( self.SetUserPlaced ) then self:SetUserPlaced(false); end
 	local Scale = self:GetEffectiveScale()
 	local ParentScale = PaperDollFrame:GetEffectiveScale()
 	local X = ( self:GetLeft() * Scale - PaperDollFrame:GetLeft() * ParentScale ) / ParentScale
@@ -911,158 +1175,10 @@ local function ApplyAnchor()
 	if ( Unlocked ) then AnchorHighlight:Show() else AnchorHighlight:Hide() end
 end
 
-local DumpFrame
-
-local function BuildDumpFrame()
-	if ( DumpFrame ) then return DumpFrame; end
-
-	local Frame = CreateFrame("Frame", "GearScoreLiteDumpFrame", UIParent)
-	Frame:SetWidth(560)
-	Frame:SetHeight(420)
-	Frame:SetPoint("CENTER")
-	Frame:SetFrameStrata("DIALOG")
-	Frame:SetBackdrop({
-		bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
-		edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
-		tile = true, tileSize = 32, edgeSize = 32,
-		insets = { left = 11, right = 12, top = 12, bottom = 11 },
-	})
-	Frame:SetMovable(true)
-	Frame:EnableMouse(true)
-	Frame:RegisterForDrag("LeftButton")
-	Frame:SetScript("OnDragStart", function(self) self:StartMoving() end)
-	Frame:SetScript("OnDragStop", function(self) self:StopMovingOrSizing() end)
-
-	local Title = Frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-	Title:SetPoint("TOP", Frame, "TOP", 0, -16)
-	Title:SetText("GearScoreLite -- scan log")
-
-	local Hint = Frame:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-	Hint:SetPoint("TOP", Title, "BOTTOM", 0, -2)
-	Hint:SetText("Ctrl+A then Ctrl+C to copy, Escape to close")
-
-	local Scroll = CreateFrame("ScrollFrame", "GearScoreLiteDumpScroll", Frame, "UIPanelScrollFrameTemplate")
-	Scroll:SetPoint("TOPLEFT", Frame, "TOPLEFT", 18, -52)
-	Scroll:SetPoint("BOTTOMRIGHT", Frame, "BOTTOMRIGHT", -36, 40)
-
-	local Edit = CreateFrame("EditBox", "GearScoreLiteDumpEdit", Scroll)
-	Edit:SetMultiLine(true)
-	Edit:SetAutoFocus(false)
-	Edit:SetFontObject(ChatFontNormal)
-	Edit:SetWidth(490)
-	Edit:SetScript("OnEscapePressed", function() Frame:Hide() end)
-	Scroll:SetScrollChild(Edit)
-
-	local Close = CreateFrame("Button", nil, Frame, "UIPanelButtonTemplate")
-	Close:SetWidth(90)
-	Close:SetHeight(22)
-	Close:SetPoint("BOTTOM", Frame, "BOTTOM", 0, 14)
-	Close:SetText("Close")
-	Close:SetScript("OnClick", function() Frame:Hide() end)
-
-	Frame.edit = Edit
-	DumpFrame = Frame
-	return Frame
-end
-
-local function DumpText()
-	local Out = {}
-	local Version = GetAddOnMetadata and GetAddOnMetadata("GearScoreLite", "Version") or "?"
-	Out[#Out + 1] = "GearScoreLite: Reborn " .. tostring(Version) .. " -- scan log"
-	Out[#Out + 1] = format("player: %s  score=%d  ilvl=%d",
-		tostring(UnitName("player")), GSL.player.score, GSL.player.ilvl)
-	Out[#Out + 1] = format("settings: colour=%s status=%s combat=%s target=%s",
-		tostring(GS_Settings and GS_Settings.ColorMode),
-		tostring(GS_Settings and GS_Settings.Status),
-		tostring(GS_Settings and GS_Settings.HideInCombat),
-		tostring(GS_Settings and GS_Settings.MustTarget))
-	Out[#Out + 1] = format("active scan: %s   queued: %d   inspect window open: %s",
-		tostring(GSL.scanName), #GSL.queue, tostring(InspectInUse()))
-
-	local Cached = 0
-	for _ in pairs(GSL.cache) do Cached = Cached + 1; end
-	Out[#Out + 1] = format("cached scores: %d", Cached)
-	Out[#Out + 1] = ""
-	Out[#Out + 1] = "--- log (oldest first) ---"
-
-	local Lines = LogLines()
-	if ( #Lines == 0 ) then
-		Out[#Out + 1] = "(empty -- hover some players first)"
-	else
-		for i = 1, #Lines do Out[#Out + 1] = Lines[i]; end
-	end
-	return table.concat(Out, "\n")
-end
-
-local function ShowDump()
-	local Frame = BuildDumpFrame()
-	Frame.edit:SetText(DumpText())
-	Frame.edit:SetCursorPosition(0)
-	Frame:Show()
-end
-
-local SlotNames = {
-	[1] = "head", [2] = "neck", [3] = "shoulder", [5] = "chest", [6] = "waist",
-	[7] = "legs", [8] = "feet", [9] = "wrist", [10] = "hands", [11] = "finger1",
-	[12] = "finger2", [13] = "trinket1", [14] = "trinket2", [15] = "back",
-	[16] = "main hand", [17] = "off hand", [18] = "ranged",
-}
-
-local function UnresolvedSlots(Unit)
-	local Missing = {}
-	for i = 1, 18 do
-		if ( i ~= 4 ) then
-			local ItemLink = GetInventoryItemLink(Unit, i)
-			if ( ItemLink ) then
-				local _, _, Rarity, Level = GetItemInfo(ItemLink)
-				if not ( Rarity ) or not ( Level ) then
-					Missing[#Missing + 1] = SlotNames[i] or ( "slot " .. i )
-				end
-			end
-		end
-	end
-	return Missing
-end
-
-local function MogOutliers(Unit)
-	local Levels, BySlot = {}, {}
-	for i = 1, 15 do
-		if ( i ~= 4 ) then
-			local ItemLink = GetInventoryItemLink(Unit, i)
-			if ( ItemLink ) then
-				local _, _, Rarity, Level = GetItemInfo(ItemLink)
-				if ( Rarity ) and ( Level ) and ( Level > 0 ) then
-					Levels[#Levels + 1] = Level
-					BySlot[#BySlot + 1] = { slot = i, ilvl = Level }
-				end
-			end
-		end
-	end
-	if ( #Levels < 5 ) then return nil; end
-	local Median = MedianOf(Levels)
-	if not ( Median ) then return nil; end
-
-	local Low = {}
-	for i = 1, #BySlot do
-		local Entry = BySlot[i]
-		if ( Entry.ilvl < Median * MOG_RATIO ) and ( Median - Entry.ilvl >= MOG_FLOOR ) then
-			Low[#Low + 1] = ( SlotNames[Entry.slot] or ( "slot " .. Entry.slot ) ) .. " (" .. Entry.ilvl .. ")"
-		end
-	end
-	return Median, Low
-end
-
 local function ResolveByName(Query)
 	if ( Query ) and ( Query ~= "" ) then
-		for i = 1, 40 do
-			local Candidate = "raid" .. i
-			if ( UnitExists(Candidate) ) and ( UnitName(Candidate) == Query ) then return Query, Candidate; end
-		end
-		for i = 1, 4 do
-			local Candidate = "party" .. i
-			if ( UnitExists(Candidate) ) and ( UnitName(Candidate) == Query ) then return Query, Candidate; end
-		end
-		if ( UnitExists("target") ) and ( UnitName("target") == Query ) then return Query, "target"; end
+		local Unit, Actual = FindUnit(Query, true)
+		if ( Unit ) then return Actual, Unit; end
 		return Query, nil
 	end
 	if ( UnitExists("target") ) then return UnitName("target"), "target"; end
@@ -1070,136 +1186,61 @@ local function ResolveByName(Query)
 	return nil, nil
 end
 
-local function ShowGear(Query)
-	local Name = ResolveByName(Query)
-	if not ( Name ) then
-		print("GearScore -- /gs gear <name>, or target somebody first.")
-		return
+local function DebugSession(Reason, FlushRing)
+	local Version = GetAddOnMetadata and GetAddOnMetadata("GearScoreLite", "Version") or "?"
+	DebugWrite("")
+	DebugWrite(format("==== GearScoreLite %s, %s, %s ====", tostring(Version), date("%Y-%m-%d %H:%M:%S"), Reason))
+	if ( GetBuildInfo ) then
+		local ClientVersion, Build = GetBuildInfo()
+		DebugWrite(format("client %s (%s), locale %s, realm %s", tostring(ClientVersion), tostring(Build),
+			tostring(GetLocale and GetLocale()), tostring(GetRealmName and GetRealmName())))
 	end
+	local _, Class = UnitClass("player")
+	DebugWrite(format("player %s, %s, level %s, score %d, ilvl %d", tostring(UnitName("player")),
+		tostring(Class), tostring(UnitLevel and UnitLevel("player")), GSL.player.score, GSL.player.ilvl))
 
-	local Entry = GSL.cache[Name]
-	if not ( Entry ) then
-		print("|cff66ccffGearScore|r -- no scan recorded for " .. tostring(Name) .. " yet. Hover them first.")
-		return
-	end
-	if not ( Entry.breakdown ) or ( #Entry.breakdown == 0 ) then
-		if not ( GS_Settings.Debug ) then
-			print("|cff66ccffGearScore|r -- the per-slot breakdown is only recorded while debugging,")
-			print("  because it is a lot of memory to hold for a whole raid. Run /gs debug, then")
-			print("  hover " .. tostring(Name) .. " again and this will have something to show.")
-		else
-			print("|cff66ccffGearScore|r -- nothing readable in " .. tostring(Name) .. "'s slots on the last scan.")
+	local Keys, Parts = {}, {}
+	for Key in pairs(GS_Settings) do Keys[#Keys + 1] = Key; end
+	sort(Keys)
+	for i = 1, #Keys do Parts[#Parts + 1] = Keys[i] .. "=" .. tostring(GS_Settings[Keys[i]]); end
+	DebugWrite("settings: " .. table.concat(Parts, " "))
+
+	if ( GetNumAddOns ) and ( GetAddOnInfo ) and ( IsAddOnLoaded ) then
+		local Loaded = {}
+		for i = 1, GetNumAddOns() do
+			local AddOn = GetAddOnInfo(i)
+			if ( AddOn ) and ( IsAddOnLoaded(AddOn) ) then Loaded[#Loaded + 1] = AddOn; end
 		end
-		return
+		DebugWrite(format("addons loaded (%d): %s", #Loaded, table.concat(Loaded, ", ")))
 	end
 
-	print(format("|cff66ccffGearScore|r -- what the last scan read for %s (score %d, iLevel %d, %d seconds ago):",
-		tostring(Name), Entry.score, Entry.ilvl, floor(GetTime() - Entry.time)))
-	for i = 1, #Entry.breakdown do
-		local Slot = Entry.breakdown[i]
-		print(format("  %-10s iLevel %-4d GS %-5d %s",
-			SlotNames[Slot.slot] or ( "slot " .. Slot.slot ),
-			Slot.ilvl, Slot.score, tostring(Slot.link)))
-	end
-	if ( Entry.suspect ) then
-		print("  Slots whose item is far below the rest are what the client received;")
-		print("  on a transmog realm that IS the cosmetic item, not the real one.")
+	if ( FlushRing ) then
+		local Lines = LogLines()
+		if ( #Lines > 0 ) then
+			DebugWrite(format("-- %d lines logged before debug was switched on --", #Lines))
+			for i = 1, #Lines do DebugWrite(Lines[i]); end
+			DebugWrite("-- live from here --")
+		end
 	end
 end
 
-local function Explain(Query)
-	local Name, Unit
-
-	if ( Query ) and ( Query ~= "" ) then
-		Name = Query
-		for i = 1, 40 do
-			local Candidate = "raid" .. i
-			if ( UnitExists(Candidate) ) and ( UnitName(Candidate) == Name ) then Unit = Candidate; break; end
+local function DebugSnapshot(Reason)
+	local Names, Parked = {}, 0
+	for Name in pairs(GSL.cache) do Names[#Names + 1] = Name; end
+	for _ in pairs(GSL.parked) do Parked = Parked + 1; end
+	sort(Names)
+	DebugWrite(format("-- session cache at %s: %d players, scanning %s, queued %d, paused %d --",
+		Reason, #Names, tostring(GSL.scanName), #GSL.queue, Parked))
+	local Now = GetTime()
+	for i = 1, min(#Names, 300) do
+		local Entry = GSL.cache[Names[i]]
+		local Flags = {}
+		for _, Flag in ipairs({ "complete", "real", "suspect", "unanswered", "settled", "interrupted", "partialSet" }) do
+			if ( Entry[Flag] ) then Flags[#Flags + 1] = Flag; end
 		end
-		if not ( Unit ) then
-			for i = 1, 4 do
-				local Candidate = "party" .. i
-				if ( UnitExists(Candidate) ) and ( UnitName(Candidate) == Name ) then Unit = Candidate; break; end
-			end
-		end
-		if not ( Unit ) and ( UnitExists("target") ) and ( UnitName("target") == Name ) then Unit = "target"; end
-	elseif ( UnitExists("target") ) then
-		Unit, Name = "target", UnitName("target")
-	elseif ( UnitExists("mouseover") ) then
-		Unit, Name = "mouseover", UnitName("mouseover")
-	end
-
-	if not ( Name ) then
-		print("GearScore -- /gs why <name>, or target somebody first.")
-		return
-	end
-
-	print("|cff66ccffGearScore|r -- report for " .. tostring(Name) .. ":")
-
-	if ( Unit ) then
-		local Blocked = Obstacle(Unit)
-		if ( Blocked ) then
-			print("  blocked: " .. ( ObstacleText[Blocked] or Blocked ))
-		else
-			print("  inspectable: yes")
-		end
-	else
-		print("  no unit token in range (not in your raid, party or target)")
-	end
-
-	local Entry = GSL.cache[Name]
-	if ( Entry ) then
-		print(format("  cached: score %d, ilvl %d, %s, %d seconds old",
-			Entry.score, Entry.ilvl, Entry.complete and "complete" or "partial",
-			floor(GetTime() - Entry.time)))
-		if ( Entry.occupied ) then
-			print(format("  that scan read %d of %d equipped slots", Entry.read or 0, Entry.occupied))
-		end
-		if ( Entry.suspect ) then
-			print("  transmog: slots far below this character's median iLevel, so the")
-			print("            real gear is better than this score. /gs mog shows it in the tooltip.")
-		end
-	else
-		print("  cached: nothing yet")
-	end
-
-	local Saved = ( type(GS_Cache) == "table" ) and GS_Cache[Name] or nil
-	if ( Saved ) then
-		print(format("  remembered from an earlier session: score %d, ilvl %d, %d hours old",
-			Saved.score, Saved.ilvl or 0, floor(( time() - Saved.time ) / 3600)))
-	end
-
-	if ( GSL.scanName == Name ) then
-		print(format("  currently scanning, %d tries left", GSL.scanTries))
-	elseif ( GSL.queued[Name] ) then
-		print("  waiting in the inspect queue")
-	end
-
-	if ( GSL.answeredFor == Name ) then
-		print("  inspect data: the client is holding this player's gear")
-	elseif ( GSL.answeredFor ) then
-		print("  inspect data: the client is holding " .. tostring(GSL.answeredFor)
-		      .. "'s gear, not this player's")
-	else
-		print("  inspect data: none held yet (request in flight)")
-	end
-
-	if ( Unit ) then
-		local _, _, _, _, Read, Occupied = GearScore_GetScore(Name, Unit)
-		if ( Occupied ) and ( Occupied > 0 ) then
-			print(format("  visible gear right now: %d of %d slots readable", Read or 0, Occupied))
-			local Missing = UnresolvedSlots(Unit)
-			if ( #Missing > 0 ) then
-				print("  unresolved, item data still arriving: " .. table.concat(Missing, ", "))
-			end
-			local Median, Low = MogOutliers(Unit)
-			if ( Median ) and ( Low ) and ( #Low > 0 ) then
-				print(format("  median armour iLevel %d; far below it: %s", Median, table.concat(Low, ", ")))
-			end
-		else
-			print("  no inspect data held right now -- the client keeps only the most")
-			print("  recent inspect, so this says nothing about the score above")
-		end
+		DebugWrite(format("  %s score=%d ilvl=%d slots=%s/%s age=%ds %s", Names[i], Entry.score, Entry.ilvl,
+			tostring(Entry.read or "-"), tostring(Entry.occupied or "-"), floor(Now - ( Entry.time or Now )),
+			table.concat(Flags, ",")))
 	end
 end
 
@@ -1221,24 +1262,32 @@ function GS_MANSET(Command)
 	elseif ( Command == "target" ) then Toggle("MustTarget", "Must Target")
 	elseif ( Command == "combat" ) then Toggle("HideInCombat", "Hide In Combat")
 	elseif ( Command == "status" ) then Toggle("Status", "Missing Score Reason")
+	elseif ( Command == "debug clear" ) then
+		GS_DebugLog = { lines = {} }
+		if ( GS_Settings.Debug ) then DebugSession("log cleared", false); end
+		print("GearScore -- debug log cleared.")
 	elseif ( Command == "debug" ) then
-		Toggle("Debug", "Debug Logging")
-		if ( GS_Settings.Debug ) then print("GearScore -- /gs dump opens the log in a copyable window."); end
-	elseif ( Verb == "why" ) then Explain(strtrim(RawArgs))
-	elseif ( Verb == "gear" ) then ShowGear(strtrim(RawArgs))
+		if ( GS_Settings.Debug ) then
+			DebugSnapshot("debug switched off")
+			DebugWrite(format("==== debug switched off, %s ====", date("%Y-%m-%d %H:%M:%S")))
+			GS_Settings.Debug = false
+			print("GearScore -- debug logging: Off.")
+		else
+			GS_Settings.Debug = true
+			DebugSession("switched on", true)
+			print("GearScore -- debug logging: On. The log is saved to WTF\\Account\\<account>\\SavedVariables\\GearScoreLite.lua")
+			print("  on /reload or logout. Reproduce the problem, then /reload and send that file.")
+		end
 	elseif ( Verb == "rescan" ) then
 		local Who, Token = ResolveByName(strtrim(RawArgs))
 		if ( Token ) then
 			GSL.cache[Who] = nil
+			GSL.parked[Who] = nil
 			Track(Who, Token, true)
 			print("GearScore -- re-reading " .. tostring(Who) .. ", check again in a moment.")
 		else
 			print("GearScore -- /gs rescan <name>, or target somebody first.")
 		end
-	elseif ( Command == "dump" ) then ShowDump()
-	elseif ( Command == "queue" ) then
-		print(format("GearScore -- scanning: %s   queued: %d", tostring(GSL.scanName), #GSL.queue))
-		for i = 1, #GSL.queue do print("  " .. i .. ". " .. tostring(GSL.queue[i])); end
 	elseif ( Command == "sheet" ) then Toggle("PaperDoll", "Character Sheet Number"); UpdatePaperDoll()
 	elseif ( Command == "lock" ) or ( Command == "unlock" ) then
 		GS_Settings.Locked = ( Command == "lock" )
@@ -1298,6 +1347,10 @@ EventFrame:SetScript("OnEvent", function(self, event, arg1)
 		if ( GSL.scanName ) then DoRescan(); end
 
 	elseif ( event == "UNIT_INVENTORY_CHANGED" ) then
+		if ( arg1 ~= "player" ) then
+			Trace("UNIT_INVENTORY_CHANGED %s (%s)%s", tostring(arg1), tostring(arg1 and UnitName(arg1)),
+			      ( arg1 and GSL.scanName and UnitName(arg1) == GSL.scanName ) and ", under the scanner" or "")
+		end
 		if ( arg1 ) and ( arg1 ~= "player" ) and ( UnitName(arg1) )
 		   and ( UnitName(arg1) == GSL.inspectTarget ) then
 			GSL.answeredFor = UnitName(arg1)
@@ -1315,12 +1368,16 @@ EventFrame:SetScript("OnEvent", function(self, event, arg1)
 				GSL.cache[Who] = nil
 				GSL.unsure[Who] = nil
 				GSL.blocked[Who] = nil
+				GSL.parked[Who] = nil
 				if ( type(GS_Cache) == "table" ) then GS_Cache[Who] = nil; end
 				if ( Had ) then Log("cache invalidated for %s (inventory changed)", tostring(Who)); end
 			end
 		end
 
 	elseif ( event == "PLAYER_TARGET_CHANGED" ) then
+		Trace("target -> %s", tostring(UnitName("target")))
+		if not ( GS_Settings ) or not ( GS_Settings.Player ) then return; end
+		if ( GS_Settings.HideInCombat ) and ( GSL.inCombat ) then return; end
 		if ( UnitExists("target") ) and ( UnitIsPlayer("target") ) then Track(UnitName("target"), "target"); end
 
 	elseif ( event == "ADDON_LOADED" ) and ( arg1 == "GearScoreLite" ) then
@@ -1330,23 +1387,42 @@ EventFrame:SetScript("OnEvent", function(self, event, arg1)
 		for Key, Value in pairs(GS_DefaultSettings) do
 			if ( GS_Settings[Key] == nil ) then GS_Settings[Key] = Value; end
 		end
-		GS_Settings.Debug = false
 		PruneStore()
 		GSL.inCombat = UnitAffectingCombat("player") and true or false
 		ApplyAnchor()
 		UpdatePaperDoll()
+		if ( GS_Settings.Debug ) then
+			DebugSession("loaded", false)
+			print("GearScore -- debug logging is on (/gs debug to stop).")
+		end
 		self:UnregisterEvent("ADDON_LOADED")
+
+	elseif ( event == "PLAYER_LOGOUT" ) then
+		if ( Debugging() ) then DebugSnapshot("logout or reload"); end
 	end
 end)
+
+local function InspectCaller()
+	if not ( debugstack ) then return "?"; end
+	local Stack = debugstack(3, 12, 0) or ""
+	for AddOn in Stack:gmatch("AddOns[\\/]([^\\/]+)[\\/]") do
+		if ( AddOn ~= "GearScoreLite" ) then return AddOn; end
+	end
+	return "unknown"
+end
 
 if ( hooksecurefunc ) then
 	hooksecurefunc("NotifyInspect", function(Unit)
 		local Who = ( Unit ) and UnitName(Unit) or nil
 		if ( Who ) then GSL.inspectTarget = Who; end
+		if ( Debugging() ) then
+			Log("NotifyInspect(%s) for %s by another addon: %s", tostring(Unit), tostring(Who), InspectCaller())
+		end
 	end)
 end
 
 EventFrame:RegisterEvent("ADDON_LOADED")
+EventFrame:RegisterEvent("PLAYER_LOGOUT")
 EventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 EventFrame:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
 EventFrame:RegisterEvent("UNIT_INVENTORY_CHANGED")
@@ -1387,6 +1463,16 @@ GearScoreLite = {
 		if not ( name ) then return; end
 		GSL.cache[name] = nil
 		GSL.unsure[name] = nil
+		GSL.parked[name] = nil
+		GSL.yields[name] = nil
+	end,
+
+	GetState = function(name)
+		if not ( name ) then return nil; end
+		if ( GSL.scanName == name ) then return "scanning"; end
+		if ( GSL.queued[name] ) then return "queued"; end
+		if ( GSL.parked[name] ) then return "paused"; end
+		return nil
 	end,
 
 	GetPlayer = function() return GSL.player.score, GSL.player.ilvl end,

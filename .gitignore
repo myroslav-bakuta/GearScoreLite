@@ -8,3 +8,6 @@ original_gearscore_addon/
 .remember/
 .claude/
 CLAUDE.md
+
+# Local release builds.
+dist/

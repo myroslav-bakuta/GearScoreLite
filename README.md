@@ -1,6 +1,6 @@
 # GearScoreLite: Reborn
 
-Helps you quickly and easily judge a player's level of gear.
+Shows how well geared a player is, right on their tooltip.
 
 A mod by **Kappa** for the **WoW FreedomUA** server, based on the final official GearScoreLite (3x04) by Mirrikat45 & Gnomezilla.
 
@@ -8,51 +8,53 @@ For World of Warcraft 3.3.5 (WotLK).
 
 ## What is GearScore?
 
-The GearScore algorithm gives you a good indication of the player's actual power level. Every item slot is intelligently weighted by how important and powerful each slot is; for example, a high level chest piece is "more powerful and provides more stats" than a high level belt, so the chest is "worth a higher score".
+GearScore is a rough measure of a player's power. Each item slot is weighted by how much it contributes: a high level chest piece carries more stats than a high level belt, so the chest is worth more.
 
-This intelligent weighting makes it much more useful than simply looking at the "average item level", since it's impossible to "cheat" the score by just wearing a few weak, high-level pieces in low-impact armor slots.
+That weighting makes it more useful than average item level. Wearing a few weak high-level pieces in low-impact slots does not inflate the score.
 
 ## Installation
 
-Download the latest `GearScoreLite-Reborn-vX.Y.Z.zip` from the [Releases page](https://github.com/myroslav-bakuta/GearScoreLite/releases), then copy the `GearScoreLite` folder out of it into `Interface\AddOns\` and restart the game.
+Download the latest `GearScoreLite-Reborn-vX.Y.Z.zip` from the [Releases page](https://github.com/myroslav-bakuta/GearScoreLite/releases), copy the `GearScoreLite` folder from it into `Interface\AddOns\`, and restart the game.
 
-Remove the original `GearScore` addon if you have it - the two define the same globals and whichever loads last silently breaks the other.
+Remove the original `GearScore` addon if you have it. Both define the same globals, and whichever loads last breaks the other without any error.
 
-Upgrading resets your options to their defaults once whenever the saved settings format changes. The addon discards an old layout rather than migrating it.
+When the saved settings format changes, upgrading resets your options to their defaults once. The addon discards the old layout rather than migrating it.
 
 ## Reading a score
 
-A player's score appears on their tooltip, with a label while it is being established:
+A player's score appears on their tooltip. While it is being established it carries a label:
 
 | Shown | Means |
 | --- | --- |
-| `GearScore: 6478 (scanning)` | The client is still sending their gear; the number will rise |
+| `GearScore: 6478 (scanning)` | Their gear is still arriving or being confirmed; the number can still change |
 | `GearScore: 6478 (scanned)` | Just read from a finished inspect |
 | `GearScore: 6478` | A settled score read a little while ago |
 | `GearScore: 6478 (memory)` | From a previous session, shown while a fresh read runs |
 
-On a realm with transmogrification the first reading is often the *cosmetic* set, because that is what the client serves before the inspect reply lands. The addon waits for the real gear and replaces the number on its own - normally within a second, without any action from you.
+On a realm with transmogrification the first reading is often the cosmetic set, because the client shows that before the inspect reply lands. The cosmetic items never carry gems, while the real ones arrive about half a second later with their gems. Once gems show up, the addon knows it has the real set, uses it even if it scores lower than the cosmetic one, and settles in about a second. For a player who wears no gems at all it waits until the set stops changing, which takes a few seconds. Only a settled or gem-confirmed score is saved for later sessions.
 
-## Highlights
+The game only hands over a player's gear while some unit token points at them: your target, focus, the player under the cursor, or a party or raid member. If you move the cursor away from a stranger before their scan finishes, the scan pauses, and the unfinished number stays marked `(scanning)`. Hover them again within two minutes and it continues from where it stopped. Players in your group, your target and your focus are read to the end without hovering.
 
-- **Scores match GearScore 3.2.1 exactly.** The 7000-band gradient for ICC/BiS gear, the 12.25 colour scale, rounded average item level, and the Titan's Grip edge case (a two-hander in either hand halves both weapon slots) all behave like the reference implementation.
-- **Transmog-aware inspect.** Gear arrives in batches and a cosmetic set looks complete long before the real one does. Scans are settled on whether the set is still changing, not on how it looks, so a mogged player converges on their true score instead of freezing at the appearance's value.
-- **A queue, so a whole raid gets scored.** The server grants one inspect at a time. Pending requests used to overwrite each other, so sweeping the raid frames left nobody scored but the last person hovered; they now wait their turn.
-- **Tells you why a score is missing** instead of showing nothing - out of range, inspect window open, scanning, or queued.
-- **Built-in diagnostics.** `/gs why` explains a single player, `/gs dump` opens a copyable log of recent scans.
-- **Gradient colour mode** as an alternative to the classic 7 colour bands, interpolated in linear light with a configurable step size.
-- **Draggable character-sheet number** with a bundled FiraSans-SemiBold font (falls back to the default WoW font if it can't be loaded).
-- **Unit frame support** for ElvUI, oUF, ShadowedUnitFrames and VuhDo - the frame under the cursor is resolved directly when Blizzard's `mouseover` token misses it.
-- **WeakAuras-friendly API** (see below).
-- **Doesn't fight the Inspect window.** No GearScore calculation happens while Blizzard's Inspect or the Examiner addon is open, which fixes the bug where the Inspect window kept changing contents and showing random talents and gear.
+## Features
+
+- Scores match GearScore 3.2.1: the 7000 band for ICC/BiS gear, the 12.25 colour scale, rounded average item level, and the Titan's Grip rule (a two-hander in either hand halves both weapon slots).
+- Transmog-aware inspect. The cosmetic set looks complete before the real one arrives, so the addon tells them apart by gems, which only the real items carry. A mogged player ends up with their real score, and a later cosmetic reading can't replace it.
+- An inspect queue. The server grants one inspect at a time, so the others wait their turn, and sweeping over the raid frames scores everyone you hovered.
+- When a score is missing, the tooltip says why: out of range, inspect window open, scanning, or queued.
+- A diagnostic log (`/gs debug`) saved to disk, so a problem can be reported with everything needed to fix it.
+- A gradient colour mode as an alternative to the classic 7 colour bands, interpolated in linear light with a configurable step.
+- A draggable number on the character sheet, in the bundled FiraSans-SemiBold font (or the default WoW font if it can't be loaded).
+- Unit frames from ElvUI, oUF, ShadowedUnitFrames and VuhDo work: when Blizzard's `mouseover` token misses the frame under the cursor, the addon resolves it directly.
+- An API for WeakAuras and other addons (see below).
+- While Blizzard's Inspect window or Examiner is open, GearScore sends no inspect requests of its own, so the window never switches to another player's gear and talents.
 
 ## Commands
 
-All of `/gs`, `/gset` and `/gearscore` work. Running `/gs` with no argument prints the command list in-game.
+`/gs`, `/gset` and `/gearscore` all work. `/gs` on its own prints the command list in game.
 
 | Command | Does |
 | --- | --- |
-| `/gs player` (or `show`) | Toggle player scores in tooltips |
+| `/gs player` (or `show`) | Toggle player scores in tooltips; while off, nobody is inspected automatically |
 | `/gs item` | Toggle item scores |
 | `/gs level` | Toggle item levels |
 | `/gs target` | Toggle "Must Target" mode |
@@ -64,46 +66,54 @@ All of `/gs`, `/gset` and `/gearscore` work. Running `/gs` with no argument prin
 | `/gs step 200` | Gradient quantisation step, in GS |
 | `/gs range 3000 6500` | Gradient low/high bounds |
 | `/gs reset` | Restore every option to its default |
+| `/gs rescan [name]` | Drop the cached score and read the player again (your target if no name) |
 
-**Must Target mode** stops GearScore from inspecting anyone unless you're already targeting them: you click the person, *then* you see their score. It reduces tooltip clutter and UI lag. Off by default, so everyone is inspected on mouseover.
+Must Target mode stops GearScore from inspecting anyone you haven't targeted: you click the person, then you see their score. It cuts tooltip clutter and UI lag. It is off by default, so everyone is inspected on mouseover.
 
-### Diagnostics
+Player names in `/gs rescan` ignore letter case, Cyrillic included: `/gs rescan мирослав` finds `Мирослав`.
 
-If a score is missing or looks wrong and you want to know why:
+## Reporting a problem
 
-| Command | Does |
-| --- | --- |
-| `/gs why [name]` | Explain why a player has no score (defaults to your target) |
-| `/gs gear [name]` | List the item read in each slot, with its score (needs `/gs debug`) |
-| `/gs rescan [name]` | Drop the cached score and read the player again |
-| `/gs dump` | Open a copyable window with the recent scan log and current state |
-| `/gs debug` | Toggle live scan logging in chat |
-| `/gs queue` | Show the pending inspect queue |
+1. Type `/gs debug`. Logging stays on across `/reload` and relogs until you type `/gs debug` again.
+2. Reproduce the problem: hover the player whose score looks wrong, wait, hover again.
+3. Type `/reload`. The game writes the log to disk only on `/reload` or logout.
+4. Send `WTF\Account\<your account>\SavedVariables\GearScoreLite.lua`.
 
-The log is recorded even while `/gs debug` is off, so `/gs dump` works right after something goes wrong without having to reproduce it. Debug output is forced off on every load.
+The log holds:
+
+- a header for each session: addon version, client build, locale, realm, your settings and the list of loaded addons;
+- about the last 120 lines from before you switched it on;
+- every scan step, and the items read in each slot whenever the set changes;
+- inspect replies, and inspects sent by other addons, with the name of the addon that sent them;
+- inventory and target changes;
+- at each `/reload` or logout, a snapshot of every score read that session.
+
+The log keeps the newest 5000 lines. `/gs debug clear` empties it.
 
 ## API
 
 For WeakAuras and other addons:
 
 ```lua
-GearScoreLite.GetScore(unit)      -- score, averageItemLevel, complete, suspect
-GearScoreLite.GetCached(name)     -- score, averageItemLevel, ageInSeconds, suspect
+GearScoreLite.GetScore(unit)      -- score, averageItemLevel, complete, suspect, slotsRead, slotsOccupied
+GearScoreLite.GetCached(name)     -- score, averageItemLevel, ageInSeconds, suspect, rememberedAt
+GearScoreLite.GetState(name)      -- "scanning", "queued", "paused" or nil
 GearScoreLite.Request(unit)       -- queue an async inspect
+GearScoreLite.Forget(name)        -- drop this session's reading, so the next look re-reads it
 GearScoreLite.GetPlayer()         -- your own score, averageItemLevel
 GearScoreLite.RegisterCallback(f) -- f(name, score, averageItemLevel)
 ```
 
-`GetScore()` returns `nil` if the unit is not a player. `suspect` means a slot looks transmogrified, so the score is a lower bound rather than a reading. `GetCached()` reads the cache only and never inspects.
+`GetScore()` returns `nil` if the unit is not a player. `suspect` means a slot looks transmogrified, so the score is a lower bound rather than a reading. `GetCached()` reads the cache only and never inspects. `rememberedAt` is a `time()` stamp, set when the number comes from a previous session; `ageInSeconds` is then 0.
 
-`Request()` always re-reads, even when a fresh score is already cached: an explicit call is treated as a deliberate request, unlike the automatic tooltip path, which leaves a recent score alone.
+`Request()` always re-reads, even when a fresh score is cached. The automatic tooltip path leaves a recent score alone; an explicit call is treated as a deliberate request.
 
-The `GEARSCORELITE_UPDATE` event fires with `(name, score, averageItemLevel)` whenever a score changes - use it as a custom WeakAuras trigger. Prefer `GetCached()` in anything that runs every frame; `GetScore()` walks all 18 inventory slots on each call.
+The `GEARSCORELITE_UPDATE` event fires with `(name, score, averageItemLevel)` whenever a score changes, your own included. Use it as a custom WeakAuras trigger. Prefer `GetCached()` in anything that runs every frame, because `GetScore()` walks all 18 inventory slots on each call.
 
 ## Removed from the original
 
-- **The enchant penalty**, which was completely broken. It was the last feature the original author added back in 2010 and it never worked; other community forks dropped it too, so this keeps everyone on the same calculations. It was pointless regardless - GearScore can't inspect gems, which matter more, and it never even checked whether the enchant was any good. If you care about someone's gems and enchants, do a normal inspect.
-- **Dead PVP scoring.**
-- **The 2010 sponsor registry** - a hardcoded list of player and realm names that got special tooltip labels.
+- The enchant penalty. It was the last feature the original author added, back in 2010, and it never worked. Other community forks dropped it too, so everyone stays on the same calculation. GearScore can't see gems, which matter more, and the penalty never checked whether an enchant was any good. If you care about someone's gems and enchants, inspect them normally.
+- PvP scoring, which no longer did anything.
+- The 2010 sponsor registry: a hardcoded list of player and realm names that got special tooltip labels.
 
 Have fun!
