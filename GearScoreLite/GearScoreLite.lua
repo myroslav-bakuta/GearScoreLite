@@ -472,6 +472,9 @@ end
 
 local STORE_MAX = 300
 local STORE_MAX_AGE = 14 * 24 * 60 * 60
+local STORE_SLACK = 50
+
+local PruneStore
 
 local function Remember(Name, Entry)
 	if ( type(GS_Cache) ~= "table" ) or Unnamed(Name) or not ( Entry ) then return; end
@@ -480,10 +483,14 @@ local function Remember(Name, Entry)
 	local Saved = GS_Cache[Name]
 	if not ( Entry.real ) and ( type(Saved) == "table" ) and ( Saved.real ) then return; end
 	GS_Cache[Name] = { score = Entry.score, ilvl = Entry.ilvl, time = time(), real = Entry.real or nil }
+	if ( Saved == nil ) then
+		GSL.stored = ( GSL.stored or 0 ) + 1
+		if ( GSL.stored > STORE_MAX + STORE_SLACK ) then PruneStore(); end
+	end
 end
 
-local function PruneStore()
-	if ( type(GS_Cache) ~= "table" ) then GS_Cache = {}; return; end
+function PruneStore()
+	if ( type(GS_Cache) ~= "table" ) then GS_Cache = {}; GSL.stored = 0; return; end
 	local Now, Names = time(), {}
 	for Name, Saved in pairs(GS_Cache) do
 		if ( type(Name) ~= "string" ) or Unnamed(Name) or ( type(Saved) ~= "table" )
@@ -495,9 +502,11 @@ local function PruneStore()
 			Names[#Names + 1] = Name
 		end
 	end
+	GSL.stored = min(#Names, STORE_MAX)
 	if ( #Names <= STORE_MAX ) then return; end
 	sort(Names, function(a, b) return GS_Cache[a].time > GS_Cache[b].time end)
 	for i = STORE_MAX + 1, #Names do GS_Cache[Names[i]] = nil; end
+	Log("memory: kept the newest %d of %d remembered players", STORE_MAX, #Names)
 end
 
 local function DisplayEntry(Name)
