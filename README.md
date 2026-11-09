@@ -103,6 +103,7 @@ GearScoreLite.Request(unit)       -- queue an async inspect
 GearScoreLite.Forget(name)        -- drop this session's reading, so the next look re-reads it
 GearScoreLite.GetPlayer()         -- your own score, averageItemLevel
 GearScoreLite.RegisterCallback(f) -- f(name, score, averageItemLevel)
+GearScoreLite.UnregisterCallback(f) -- stop calling f
 ```
 
 `GetScore()` returns `nil` if the unit is not a player. `suspect` means a slot looks transmogrified, so the score is a lower bound rather than a reading. `GetCached()` reads the cache only and never inspects. `rememberedAt` is a `time()` stamp, set when the number comes from a previous session; `ageInSeconds` is then 0.

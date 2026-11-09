@@ -1479,4 +1479,10 @@ GearScoreLite = {
 	RegisterCallback = function(callback)
 		if ( type(callback) == "function" ) then tinsert(GSL.listeners, callback); end
 	end,
+
+	UnregisterCallback = function(callback)
+		for i = #GSL.listeners, 1, -1 do
+			if ( GSL.listeners[i] == callback ) then table.remove(GSL.listeners, i); end
+		end
+	end,
 }
