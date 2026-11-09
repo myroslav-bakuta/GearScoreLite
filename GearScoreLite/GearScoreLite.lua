@@ -1439,10 +1439,12 @@ for _, Event in ipairs({ "INSPECT_TALENT_READY", "INSPECT_READY" }) do
 end
 
 GameTooltip:HookScript("OnTooltipSetUnit", GearScore_HookSetUnit)
-GameTooltip:HookScript("OnTooltipSetItem", ItemTooltipHook)
-ShoppingTooltip1:HookScript("OnTooltipSetItem", ItemTooltipHook)
-ShoppingTooltip2:HookScript("OnTooltipSetItem", ItemTooltipHook)
-ItemRefTooltip:HookScript("OnTooltipSetItem", ItemTooltipHook)
+for _, Name in ipairs({ "GameTooltip", "ShoppingTooltip1", "ShoppingTooltip2", "ShoppingTooltip3",
+                        "ItemRefTooltip", "ItemRefShoppingTooltip1", "ItemRefShoppingTooltip2",
+                        "ItemRefShoppingTooltip3" }) do
+	local Tooltip = _G[Name]
+	if ( Tooltip ) then Tooltip:HookScript("OnTooltipSetItem", ItemTooltipHook); end
+end
 PaperDollFrame:HookScript("OnShow", function() QueuePlayerRescan() end)
 
 SlashCmdList["MY2SCRIPT"] = GS_MANSET
