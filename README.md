@@ -65,7 +65,7 @@ The game only hands over a player's gear while some unit token points at them: y
 | `/gs color` | Switch between `classic` and `gradient` colours |
 | `/gs step 200` | Gradient quantisation step, in GS |
 | `/gs range 3000 6500` | Gradient low/high bounds |
-| `/gs reset` | Restore every option to its default |
+| `/gs reset` | Restore every option to its default (a running debug log keeps going) |
 | `/gs rescan [name]` | Drop the cached score and read the player again (your target if no name) |
 
 Must Target mode stops GearScore from inspecting anyone you haven't targeted: you click the person, then you see their score. It cuts tooltip clutter and UI lag. It is off by default, so everyone is inspected on mouseover.

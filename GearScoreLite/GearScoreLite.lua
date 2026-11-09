@@ -1321,8 +1321,11 @@ function GS_MANSET(Command)
 			print("GearScore -- usage: /gs range 3000 6500")
 		end
 	elseif ( Command == "reset" ) then
+		local Debug = GS_Settings.Debug
 		for Key in pairs(GS_Settings) do GS_Settings[Key] = nil; end
 		for Key, Value in pairs(GS_DefaultSettings) do GS_Settings[Key] = Value; end
+		GS_Settings.Debug = Debug
+		Log("options reset to default")
 		ApplyAnchor()
 		UpdatePaperDoll()
 		print("GearScore -- options reset to default.")
