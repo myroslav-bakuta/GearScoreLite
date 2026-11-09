@@ -376,12 +376,12 @@ local function MatchName(Unit, Name, Loose)
 end
 
 local function GroupUnit(Name, Loose)
-	local Raid = GetNumRaidMembers and GetNumRaidMembers() or 40
+	local Raid = GetNumRaidMembers()
 	for i = 1, Raid do
 		local Actual = MatchName("raid" .. i, Name, Loose)
 		if ( Actual ) then return "raid" .. i, Actual; end
 	end
-	local Party = GetNumPartyMembers and GetNumPartyMembers() or 4
+	local Party = GetNumPartyMembers()
 	for i = 1, Party do
 		local Actual = MatchName("party" .. i, Name, Loose)
 		if ( Actual ) then return "party" .. i, Actual; end
@@ -449,11 +449,11 @@ local function Obstacle(Unit)
 	if not ( Unit ) or not ( UnitExists(Unit) ) then return "gone"; end
 	if not ( UnitIsPlayer(Unit) ) then return "npc"; end
 	if ( UnitIsUnit(Unit, "player") ) then return nil; end
-	if ( UnitIsConnected ) and not ( UnitIsConnected(Unit) ) then return "offline"; end
+	if not ( UnitIsConnected(Unit) ) then return "offline"; end
 
 	if ( InspectInUse() ) and not ( InspectingUnit(Unit) ) then return "inspectbusy"; end
 	if not ( CanInspect(Unit) ) then return "cannotinspect"; end
-	if ( CheckInteractDistance ) and not ( CheckInteractDistance(Unit, 1) ) then return "range"; end
+	if not ( CheckInteractDistance(Unit, 1) ) then return "range"; end
 	return nil
 end
 
@@ -1142,7 +1142,7 @@ Anchor:SetScript("OnDragStart", function(self) self:StartMoving() end)
 
 Anchor:SetScript("OnDragStop", function(self)
 	self:StopMovingOrSizing()
-	if ( self.SetUserPlaced ) then self:SetUserPlaced(false); end
+	self:SetUserPlaced(false)
 	local Scale = self:GetEffectiveScale()
 	local ParentScale = PaperDollFrame:GetEffectiveScale()
 	local X = ( self:GetLeft() * Scale - PaperDollFrame:GetLeft() * ParentScale ) / ParentScale
@@ -1191,17 +1191,15 @@ local function ResolveByName(Query)
 end
 
 local function DebugSession(Reason, FlushRing)
-	local Version = GetAddOnMetadata and GetAddOnMetadata("GearScoreLite", "Version") or "?"
+	local Version = GetAddOnMetadata("GearScoreLite", "Version") or "?"
 	DebugWrite("")
 	DebugWrite(format("==== GearScoreLite %s, %s, %s ====", tostring(Version), date("%Y-%m-%d %H:%M:%S"), Reason))
-	if ( GetBuildInfo ) then
-		local ClientVersion, Build = GetBuildInfo()
-		DebugWrite(format("client %s (%s), locale %s, realm %s", tostring(ClientVersion), tostring(Build),
-			tostring(GetLocale and GetLocale()), tostring(GetRealmName and GetRealmName())))
-	end
+	local ClientVersion, Build = GetBuildInfo()
+	DebugWrite(format("client %s (%s), locale %s, realm %s", tostring(ClientVersion), tostring(Build),
+		tostring(GetLocale()), tostring(GetRealmName())))
 	local _, Class = UnitClass("player")
 	DebugWrite(format("player %s, %s, level %s, score %d, ilvl %d", tostring(UnitName("player")),
-		tostring(Class), tostring(UnitLevel and UnitLevel("player")), GSL.player.score, GSL.player.ilvl))
+		tostring(Class), tostring(UnitLevel("player")), GSL.player.score, GSL.player.ilvl))
 
 	local Keys, Parts = {}, {}
 	for Key in pairs(GS_Settings) do Keys[#Keys + 1] = Key; end
@@ -1209,14 +1207,12 @@ local function DebugSession(Reason, FlushRing)
 	for i = 1, #Keys do Parts[#Parts + 1] = Keys[i] .. "=" .. tostring(GS_Settings[Keys[i]]); end
 	DebugWrite("settings: " .. table.concat(Parts, " "))
 
-	if ( GetNumAddOns ) and ( GetAddOnInfo ) and ( IsAddOnLoaded ) then
-		local Loaded = {}
-		for i = 1, GetNumAddOns() do
-			local AddOn = GetAddOnInfo(i)
-			if ( AddOn ) and ( IsAddOnLoaded(AddOn) ) then Loaded[#Loaded + 1] = AddOn; end
-		end
-		DebugWrite(format("addons loaded (%d): %s", #Loaded, table.concat(Loaded, ", ")))
+	local Loaded = {}
+	for i = 1, GetNumAddOns() do
+		local AddOn = GetAddOnInfo(i)
+		if ( AddOn ) and ( IsAddOnLoaded(AddOn) ) then Loaded[#Loaded + 1] = AddOn; end
 	end
+	DebugWrite(format("addons loaded (%d): %s", #Loaded, table.concat(Loaded, ", ")))
 
 	if ( FlushRing ) then
 		local Lines = LogLines()
@@ -1346,7 +1342,7 @@ EventFrame:SetScript("OnEvent", function(self, event, arg1)
 	elseif ( event == "PLAYER_EQUIPMENT_CHANGED" ) or ( event == "PLAYER_ENTERING_WORLD" ) then
 		QueuePlayerRescan()
 
-	elseif ( event == "INSPECT_TALENT_READY" ) or ( event == "INSPECT_READY" ) then
+	elseif ( event == "INSPECT_TALENT_READY" ) then
 		if ( GSL.inspectTarget ) then
 			GSL.answeredFor = GSL.inspectTarget
 			Log("inspect reply, attributed to %s", tostring(GSL.inspectTarget))
@@ -1410,7 +1406,6 @@ EventFrame:SetScript("OnEvent", function(self, event, arg1)
 end)
 
 local function InspectCaller()
-	if not ( debugstack ) then return "?"; end
 	local Stack = debugstack(3, 12, 0) or ""
 	for AddOn in Stack:gmatch("AddOns[\\/]([^\\/]+)[\\/]") do
 		if ( AddOn ~= "GearScoreLite" ) then return AddOn; end
@@ -1418,15 +1413,13 @@ local function InspectCaller()
 	return "unknown"
 end
 
-if ( hooksecurefunc ) then
-	hooksecurefunc("NotifyInspect", function(Unit)
-		local Who = ( Unit ) and UnitName(Unit) or nil
-		if ( Who ) then GSL.inspectTarget = Who; end
-		if ( Debugging() ) then
-			Log("NotifyInspect(%s) for %s by another addon: %s", tostring(Unit), tostring(Who), InspectCaller())
-		end
-	end)
-end
+hooksecurefunc("NotifyInspect", function(Unit)
+	local Who = ( Unit ) and UnitName(Unit) or nil
+	if ( Who ) then GSL.inspectTarget = Who; end
+	if ( Debugging() ) then
+		Log("NotifyInspect(%s) for %s by another addon: %s", tostring(Unit), tostring(Who), InspectCaller())
+	end
+end)
 
 EventFrame:RegisterEvent("ADDON_LOADED")
 EventFrame:RegisterEvent("PLAYER_LOGOUT")
@@ -1436,10 +1429,7 @@ EventFrame:RegisterEvent("UNIT_INVENTORY_CHANGED")
 EventFrame:RegisterEvent("PLAYER_TARGET_CHANGED")
 EventFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
 EventFrame:RegisterEvent("PLAYER_REGEN_DISABLED")
-
-for _, Event in ipairs({ "INSPECT_TALENT_READY", "INSPECT_READY" }) do
-	pcall(EventFrame.RegisterEvent, EventFrame, Event)
-end
+EventFrame:RegisterEvent("INSPECT_TALENT_READY")
 
 GameTooltip:HookScript("OnTooltipSetUnit", GearScore_HookSetUnit)
 for _, Name in ipairs({ "GameTooltip", "ShoppingTooltip1", "ShoppingTooltip2", "ShoppingTooltip3",
