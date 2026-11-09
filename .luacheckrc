@@ -10,7 +10,7 @@ max_code_line_length = false
 max_string_line_length = false
 max_comment_line_length = false
 
-allow_defined = true
+allow_defined = false
 
 exclude_files = {
 	"./.git",
@@ -53,6 +53,7 @@ globals = {
 	-- so luacheck cannot see where they are defined.
 	"GS_Settings",
 	"GS_Cache",
+	"GS_DebugLog",
 
 	-- Globals this addon defines and shares with the original GearScore,
 	-- plus the public API table other addons and WeakAuras read.
@@ -61,6 +62,8 @@ globals = {
 	"GearScore_GetItemScore",
 	"GearScore_GetQuality",
 	"GearScore_HookSetUnit",
+	"GearScore_HookItem",
+	"GS_CommandList",
 	"GS_Formula",
 	"GS_Quality",
 	"GS_ItemTypes",
@@ -70,14 +73,13 @@ globals = {
 	"GS_MANSET",
 	"PersonalGearScore",
 	"GearScoreLiteAnchor",
-	"GearScoreLiteDumpFrame",
 
 	-- Optional integrations, all guarded by runtime nil checks.
 	"WeakAuras",
 	"Examiner",
-	"ElvUF_Raid",
-	"oUF",
-	"VuhDo",
+
+	-- Client strings not in the generated list below.
+	"UNKNOWNOBJECT",
 
 	"ACHIEVEMENTFRAME_SUBFRAMES",
 	"ACHIEVEMENTUI_CATEGORIES",
