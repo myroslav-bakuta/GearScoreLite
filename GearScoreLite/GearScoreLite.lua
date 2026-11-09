@@ -1063,7 +1063,7 @@ function GearScore_HookSetUnit()
 end
 
 local HunterRanged = {
-	["INVTYPE_RANGEDRIGHT"] = true, ["INVTYPE_RANGED"] = true,
+	["INVTYPE_RANGEDRIGHT"] = true, ["INVTYPE_RANGED"] = true, ["INVTYPE_THROWN"] = true,
 }
 local HunterMelee = {
 	["INVTYPE_2HWEAPON"] = true, ["INVTYPE_WEAPONMAINHAND"] = true,
