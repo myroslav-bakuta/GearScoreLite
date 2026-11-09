@@ -466,11 +466,15 @@ local ObstacleText = {
 	["range"]         = "out of inspect range (~28 yards)",
 }
 
+local function Unnamed(Name)
+	return not ( Name ) or ( Name == "" ) or ( Name == UNKNOWNOBJECT )
+end
+
 local STORE_MAX = 300
 local STORE_MAX_AGE = 14 * 24 * 60 * 60
 
 local function Remember(Name, Entry)
-	if ( type(GS_Cache) ~= "table" ) or not ( Name ) or not ( Entry ) then return; end
+	if ( type(GS_Cache) ~= "table" ) or Unnamed(Name) or not ( Entry ) then return; end
 	if not ( Entry.complete ) or ( Entry.suspect ) or ( Entry.unanswered )
 	   or ( Entry.score <= 0 ) then return; end
 	local Saved = GS_Cache[Name]
@@ -482,7 +486,7 @@ local function PruneStore()
 	if ( type(GS_Cache) ~= "table" ) then GS_Cache = {}; return; end
 	local Now, Names = time(), {}
 	for Name, Saved in pairs(GS_Cache) do
-		if ( type(Name) ~= "string" ) or ( type(Saved) ~= "table" )
+		if ( type(Name) ~= "string" ) or Unnamed(Name) or ( type(Saved) ~= "table" )
 		   or ( type(Saved.score) ~= "number" ) or ( Saved.score <= 0 )
 		   or ( type(Saved.time) ~= "number" ) or ( ( Now - Saved.time ) > STORE_MAX_AGE ) then
 			GS_Cache[Name] = nil
@@ -914,7 +918,7 @@ local function Track(Name, Unit, Force)
 	PruneSession()
 	if not ( Unit ) or not ( UnitExists(Unit) ) or not ( UnitIsPlayer(Unit) ) then return; end
 	Name = Name or UnitName(Unit)
-	if not ( Name ) then return; end
+	if Unnamed(Name) then return; end
 	if not ( Force ) and ( IsFresh(Name) ) then return; end
 	Unit = StableUnit(Name, Unit)
 
@@ -1004,7 +1008,7 @@ function GearScore_HookSetUnit()
 	if ( GS_Settings.HideInCombat ) and ( GSL.inCombat ) then return; end
 
 	local Name, Unit = ResolveTooltipUnit()
-	if not ( Name ) then return; end
+	if Unnamed(Name) then return; end
 
 	if ( Unit ) and not ( GSL.refreshing ) then
 		if ( not GS_Settings.MustTarget ) or ( UnitIsUnit("target", Unit) ) then
