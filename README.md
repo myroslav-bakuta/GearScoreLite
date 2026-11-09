@@ -40,6 +40,7 @@ The game only hands over a player's gear while some unit token points at them: y
 - Scores match GearScore 3.2.1: the 7000 band for ICC/BiS gear, the 12.25 colour scale, rounded average item level, and the Titan's Grip rule (a two-hander in either hand halves both weapon slots).
 - Transmog-aware inspect. The cosmetic set looks complete before the real one arrives, so the addon tells them apart by gems, which only the real items carry. A mogged player ends up with their real score, and a later cosmetic reading can't replace it.
 - An inspect queue. The server grants one inspect at a time, so the others wait their turn, and sweeping over the raid frames scores everyone you hovered.
+- Item scores on every item tooltip, including the comparison tooltips and the ones next to a chat link.
 - When a score is missing, the tooltip says why: out of range, inspect window open, scanning, or queued.
 - A diagnostic log (`/gs debug`) saved to disk, so a problem can be reported with everything needed to fix it.
 - A gradient colour mode as an alternative to the classic 7 colour bands, interpolated in linear light with a configurable step.
@@ -112,7 +113,7 @@ The `GEARSCORELITE_UPDATE` event fires with `(name, score, averageItemLevel)` wh
 
 ## Removed from the original
 
-- The enchant penalty. It was the last feature the original author added, back in 2010, and it never worked. Other community forks dropped it too, so everyone stays on the same calculation. GearScore can't see gems, which matter more, and the penalty never checked whether an enchant was any good. If you care about someone's gems and enchants, inspect them normally.
+- The enchant penalty. It was the last feature the original author added, back in 2010, and it never worked. Other community forks dropped it too, so everyone stays on the same calculation. GearScore does not score gems, which matter more, and the penalty never checked whether an enchant was any good. If you care about someone's gems and enchants, inspect them normally.
 - PvP scoring, which no longer did anything.
 - The 2010 sponsor registry: a hardcoded list of player and realm names that got special tooltip labels.
 
