@@ -402,7 +402,7 @@ local function FindUnit(Name, Loose)
 	return nil, nil
 end
 
-local RescanFrame = CreateFrame("Frame", nil, UIParent)
+local RescanFrame = CreateFrame("Frame")
 RescanFrame:Hide()
 
 local SCAN_TRIES = 24
