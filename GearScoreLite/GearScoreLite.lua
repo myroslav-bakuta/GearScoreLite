@@ -1084,7 +1084,7 @@ function GearScore_HookItem(ItemName, ItemLink, Tooltip)
 		return
 	end
 
-	if ( GS_Settings.Level ) and ( ItemLevel ) then
+	if ( GS_Settings.Level ) and ( ItemLevel ) and ( ItemLevel > 0 ) then
 		Tooltip:AddDoubleLine("GearScore: " .. ItemScore, "(iLevel " .. ItemLevel .. ")", Red, Green, Blue, Red, Green, Blue)
 	else
 		Tooltip:AddLine("GearScore: " .. ItemScore, Red, Green, Blue)
